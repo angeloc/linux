@@ -1,12 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _SPARC64_PAGE_H
 #define _SPARC64_PAGE_H
 
 #include <linux/const.h>
 
-#define PAGE_SHIFT   13
-
-#define PAGE_SIZE    (_AC(1,UL) << PAGE_SHIFT)
-#define PAGE_MASK    (~(PAGE_SIZE-1))
+#include <vdso/page.h>
 
 /* Flushing for D-cache alias handling is only needed if
  * the page size is smaller than 16K.
@@ -17,7 +15,10 @@
 
 #define HPAGE_SHIFT		23
 #define REAL_HPAGE_SHIFT	22
-
+#define HPAGE_16GB_SHIFT	34
+#define HPAGE_2GB_SHIFT		31
+#define HPAGE_256MB_SHIFT	28
+#define HPAGE_64K_SHIFT		16
 #define REAL_HPAGE_SIZE		(_AC(1,UL) << REAL_HPAGE_SHIFT)
 
 #if defined(CONFIG_HUGETLB_PAGE) || defined(CONFIG_TRANSPARENT_HUGEPAGE)
@@ -25,9 +26,11 @@
 #define HPAGE_MASK		(~(HPAGE_SIZE - 1UL))
 #define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
 #define HAVE_ARCH_HUGETLB_UNMAPPED_AREA
+#define REAL_HPAGE_PER_HPAGE	(_AC(1,UL) << (HPAGE_SHIFT - REAL_HPAGE_SHIFT))
+#define HUGE_MAX_HSTATE		5
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #if defined(CONFIG_HUGETLB_PAGE) || defined(CONFIG_TRANSPARENT_HUGEPAGE)
 struct pt_regs;
@@ -40,8 +43,15 @@ void _clear_page(void *page);
 #define clear_page(X)	_clear_page((void *)(X))
 struct page;
 void clear_user_page(void *addr, unsigned long vaddr, struct page *page);
+#define clear_user_page clear_user_page
 #define copy_page(X,Y)	memcpy((void *)(X), (void *)(Y), PAGE_SIZE)
 void copy_user_page(void *to, void *from, unsigned long vaddr, struct page *topage);
+#define __HAVE_ARCH_COPY_USER_HIGHPAGE
+struct vm_area_struct;
+void copy_user_highpage(struct page *to, struct page *from,
+			unsigned long vaddr, struct vm_area_struct *vma);
+#define __HAVE_ARCH_COPY_HIGHPAGE
+void copy_highpage(struct page *to, struct page *from);
 
 /* Unlike sparc32, sparc64's parameter passing API is more
  * sane in that structures which as small enough are passed
@@ -119,7 +129,7 @@ extern unsigned long sparc64_va_hole_bottom;
 
 extern unsigned long PAGE_OFFSET;
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(__ASSEMBLER__) */
 
 /* The maximum number of physical memory address bits we support.  The
  * largest value we can support is whatever "KPGD_SHIFT + KPTE_BITS"
@@ -130,7 +140,7 @@ extern unsigned long PAGE_OFFSET;
 #define ILOG2_4MB		22
 #define ILOG2_256MB		28
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define __pa(x)			((unsigned long)(x) - PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long) (x) + PAGE_OFFSET))
@@ -144,10 +154,7 @@ extern unsigned long PAGE_OFFSET;
 #define virt_to_phys __pa
 #define phys_to_virt __va
 
-#endif /* !(__ASSEMBLY__) */
-
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
+#endif /* !(__ASSEMBLER__) */
 
 #include <asm-generic/getorder.h>
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * FB driver for the ILI9341 LCD display controller
  *
@@ -8,16 +9,6 @@
  *
  * Copyright (C) 2013 Christian Vogelgsang
  * Based on adafruit22fb.c by Noralf Tronnes
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -74,17 +65,6 @@ static int init_display(struct fbtft_par *par)
 	return 0;
 }
 
-static void set_addr_win(struct fbtft_par *par, int xs, int ys, int xe, int ye)
-{
-	write_reg(par, MIPI_DCS_SET_COLUMN_ADDRESS,
-		  (xs >> 8) & 0xFF, xs & 0xFF, (xe >> 8) & 0xFF, xe & 0xFF);
-
-	write_reg(par, MIPI_DCS_SET_PAGE_ADDRESS,
-		  (ys >> 8) & 0xFF, ys & 0xFF, (ye >> 8) & 0xFF, ye & 0xFF);
-
-	write_reg(par, MIPI_DCS_WRITE_MEMORY_START);
-}
-
 #define MEM_Y   BIT(7) /* MY row address order */
 #define MEM_X   BIT(6) /* MX column address order */
 #define MEM_V   BIT(5) /* MV row / column exchange */
@@ -120,8 +100,8 @@ static int set_var(struct fbtft_par *par)
  *  Positive: Par1 Par2 [...] Par15
  *  Negative: Par1 Par2 [...] Par15
  */
-#define CURVE(num, idx)  curves[num * par->gamma.num_values + idx]
-static int set_gamma(struct fbtft_par *par, unsigned long *curves)
+#define CURVE(num, idx)  curves[(num) * par->gamma.num_values + (idx)]
+static int set_gamma(struct fbtft_par *par, u32 *curves)
 {
 	int i;
 
@@ -148,13 +128,12 @@ static struct fbtft_display display = {
 	.gamma = DEFAULT_GAMMA,
 	.fbtftops = {
 		.init_display = init_display,
-		.set_addr_win = set_addr_win,
 		.set_var = set_var,
 		.set_gamma = set_gamma,
 	},
 };
 
-FBTFT_REGISTER_DRIVER(DRVNAME, "ilitek,ili9341", &display);
+FBTFT_REGISTER_SPI_DRIVER(DRVNAME, "ilitek", "ili9341", &display);
 
 MODULE_ALIAS("spi:" DRVNAME);
 MODULE_ALIAS("platform:" DRVNAME);

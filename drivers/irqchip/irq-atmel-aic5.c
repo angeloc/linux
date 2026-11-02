@@ -67,8 +67,7 @@
 
 static struct irq_domain *aic5_domain;
 
-static asmlinkage void __exception_irq_entry
-aic5_handle(struct pt_regs *regs)
+static void __exception_irq_entry aic5_handle(struct pt_regs *regs)
 {
 	struct irq_chip_generic *bgc = irq_get_domain_generic_chip(aic5_domain, 0);
 	u32 irqnr;
@@ -80,7 +79,7 @@ aic5_handle(struct pt_regs *regs)
 	if (!irqstat)
 		irq_reg_writel(bgc, 0, AT91_AIC5_EOICR);
 	else
-		handle_domain_irq(aic5_domain, irqnr, regs);
+		generic_handle_domain_irq(aic5_domain, irqnr);
 }
 
 static void aic5_mask(struct irq_data *d)
@@ -93,11 +92,10 @@ static void aic5_mask(struct irq_data *d)
 	 * Disable interrupt on AIC5. We always take the lock of the
 	 * first irq chip as all chips share the same registers.
 	 */
-	irq_gc_lock(bgc);
+	guard(raw_spinlock)(&bgc->lock);
 	irq_reg_writel(gc, d->hwirq, AT91_AIC5_SSR);
 	irq_reg_writel(gc, 1, AT91_AIC5_IDCR);
 	gc->mask_cache &= ~d->mask;
-	irq_gc_unlock(bgc);
 }
 
 static void aic5_unmask(struct irq_data *d)
@@ -110,11 +108,10 @@ static void aic5_unmask(struct irq_data *d)
 	 * Enable interrupt on AIC5. We always take the lock of the
 	 * first irq chip as all chips share the same registers.
 	 */
-	irq_gc_lock(bgc);
+	guard(raw_spinlock)(&bgc->lock);
 	irq_reg_writel(gc, d->hwirq, AT91_AIC5_SSR);
 	irq_reg_writel(gc, 1, AT91_AIC5_IECR);
 	gc->mask_cache |= d->mask;
-	irq_gc_unlock(bgc);
 }
 
 static int aic5_retrigger(struct irq_data *d)
@@ -123,12 +120,10 @@ static int aic5_retrigger(struct irq_data *d)
 	struct irq_chip_generic *bgc = irq_get_domain_generic_chip(domain, 0);
 
 	/* Enable interrupt on AIC5 */
-	irq_gc_lock(bgc);
+	guard(raw_spinlock)(&bgc->lock);
 	irq_reg_writel(bgc, d->hwirq, AT91_AIC5_SSR);
 	irq_reg_writel(bgc, 1, AT91_AIC5_ISCR);
-	irq_gc_unlock(bgc);
-
-	return 0;
+	return 1;
 }
 
 static int aic5_set_type(struct irq_data *d, unsigned type)
@@ -138,18 +133,18 @@ static int aic5_set_type(struct irq_data *d, unsigned type)
 	unsigned int smr;
 	int ret;
 
-	irq_gc_lock(bgc);
+	guard(raw_spinlock)(&bgc->lock);
 	irq_reg_writel(bgc, d->hwirq, AT91_AIC5_SSR);
 	smr = irq_reg_readl(bgc, AT91_AIC5_SMR);
 	ret = aic_common_set_type(d, type, &smr);
 	if (!ret)
 		irq_reg_writel(bgc, smr, AT91_AIC5_SMR);
-	irq_gc_unlock(bgc);
-
 	return ret;
 }
 
 #ifdef CONFIG_PM
+static u32 *smr_cache;
+
 static void aic5_suspend(struct irq_data *d)
 {
 	struct irq_domain *domain = d->domain;
@@ -159,7 +154,13 @@ static void aic5_suspend(struct irq_data *d)
 	int i;
 	u32 mask;
 
-	irq_gc_lock(bgc);
+	if (smr_cache)
+		for (i = 0; i < domain->revmap_size; i++) {
+			irq_reg_writel(bgc, i, AT91_AIC5_SSR);
+			smr_cache[i] = irq_reg_readl(bgc, AT91_AIC5_SMR);
+		}
+
+	guard(raw_spinlock)(&bgc->lock);
 	for (i = 0; i < dgc->irqs_per_chip; i++) {
 		mask = 1 << i;
 		if ((mask & gc->mask_cache) == (mask & gc->wake_active))
@@ -171,7 +172,6 @@ static void aic5_suspend(struct irq_data *d)
 		else
 			irq_reg_writel(bgc, 1, AT91_AIC5_IDCR);
 	}
-	irq_gc_unlock(bgc);
 }
 
 static void aic5_resume(struct irq_data *d)
@@ -183,10 +183,22 @@ static void aic5_resume(struct irq_data *d)
 	int i;
 	u32 mask;
 
-	irq_gc_lock(bgc);
+	guard(raw_spinlock)(&bgc->lock);
+
+	if (smr_cache) {
+		irq_reg_writel(bgc, 0xffffffff, AT91_AIC5_SPU);
+		for (i = 0; i < domain->revmap_size; i++) {
+			irq_reg_writel(bgc, i, AT91_AIC5_SSR);
+			irq_reg_writel(bgc, i, AT91_AIC5_SVR);
+			irq_reg_writel(bgc, smr_cache[i], AT91_AIC5_SMR);
+		}
+	}
+
 	for (i = 0; i < dgc->irqs_per_chip; i++) {
 		mask = 1 << i;
-		if ((mask & gc->mask_cache) == (mask & gc->wake_active))
+
+		if (!smr_cache &&
+		    ((mask & gc->mask_cache) == (mask & gc->wake_active)))
 			continue;
 
 		irq_reg_writel(bgc, i + gc->irq_base, AT91_AIC5_SSR);
@@ -195,7 +207,6 @@ static void aic5_resume(struct irq_data *d)
 		else
 			irq_reg_writel(bgc, 1, AT91_AIC5_IDCR);
 	}
-	irq_gc_unlock(bgc);
 }
 
 static void aic5_pm_shutdown(struct irq_data *d)
@@ -206,13 +217,12 @@ static void aic5_pm_shutdown(struct irq_data *d)
 	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(d);
 	int i;
 
-	irq_gc_lock(bgc);
+	guard(raw_spinlock_irqsave)(&bgc->lock);
 	for (i = 0; i < dgc->irqs_per_chip; i++) {
 		irq_reg_writel(bgc, i + gc->irq_base, AT91_AIC5_SSR);
 		irq_reg_writel(bgc, 1, AT91_AIC5_IDCR);
 		irq_reg_writel(bgc, 1, AT91_AIC5_ICCR);
 	}
-	irq_gc_unlock(bgc);
 }
 #else
 #define aic5_suspend		NULL
@@ -269,13 +279,11 @@ static int aic5_irq_domain_xlate(struct irq_domain *d,
 	if (ret)
 		return ret;
 
-	irq_gc_lock(bgc);
+	guard(raw_spinlock_irqsave)(&bgc->lock);
 	irq_reg_writel(bgc, *out_hwirq, AT91_AIC5_SSR);
 	smr = irq_reg_readl(bgc, AT91_AIC5_SMR);
 	aic_common_set_priority(intspec[2], &smr);
 	irq_reg_writel(bgc, smr, AT91_AIC5_SMR);
-	irq_gc_unlock(bgc);
-
 	return ret;
 }
 
@@ -284,14 +292,22 @@ static const struct irq_domain_ops aic5_irq_ops = {
 	.xlate	= aic5_irq_domain_xlate,
 };
 
-static void __init sama5d3_aic_irq_fixup(struct device_node *root)
+static void __init sama5d3_aic_irq_fixup(void)
 {
-	aic_common_rtc_irq_fixup(root);
+	aic_common_rtc_irq_fixup();
+}
+
+static void __init sam9x60_aic_irq_fixup(void)
+{
+	aic_common_rtc_irq_fixup();
+	aic_common_rtt_irq_fixup();
 }
 
 static const struct of_device_id aic5_irq_fixups[] __initconst = {
 	{ .compatible = "atmel,sama5d3", .data = sama5d3_aic_irq_fixup },
 	{ .compatible = "atmel,sama5d4", .data = sama5d3_aic_irq_fixup },
+	{ .compatible = "microchip,sam9x60", .data = sam9x60_aic_irq_fixup },
+	{ .compatible = "microchip,sam9x7", .data = sam9x60_aic_irq_fixup },
 	{ /* sentinel */ },
 };
 
@@ -341,6 +357,13 @@ static int __init aic5_of_init(struct device_node *node,
 static int __init sama5d2_aic5_of_init(struct device_node *node,
 				       struct device_node *parent)
 {
+#ifdef CONFIG_PM
+	smr_cache = kcalloc(DIV_ROUND_UP(NR_SAMA5D2_IRQS, 32) * 32,
+			    sizeof(*smr_cache), GFP_KERNEL);
+	if (!smr_cache)
+		return -ENOMEM;
+#endif
+
 	return aic5_of_init(node, parent, NR_SAMA5D2_IRQS);
 }
 IRQCHIP_DECLARE(sama5d2_aic5, "atmel,sama5d2-aic", sama5d2_aic5_of_init);
@@ -362,3 +385,20 @@ static int __init sama5d4_aic5_of_init(struct device_node *node,
 	return aic5_of_init(node, parent, NR_SAMA5D4_IRQS);
 }
 IRQCHIP_DECLARE(sama5d4_aic5, "atmel,sama5d4-aic", sama5d4_aic5_of_init);
+
+#define NR_SAM9X60_IRQS		50
+
+static int __init sam9x60_aic5_of_init(struct device_node *node,
+				       struct device_node *parent)
+{
+	return aic5_of_init(node, parent, NR_SAM9X60_IRQS);
+}
+IRQCHIP_DECLARE(sam9x60_aic5, "microchip,sam9x60-aic", sam9x60_aic5_of_init);
+
+#define NR_SAM9X7_IRQS		70
+
+static int __init sam9x7_aic5_of_init(struct device_node *node, struct device_node *parent)
+{
+	return aic5_of_init(node, parent, NR_SAM9X7_IRQS);
+}
+IRQCHIP_DECLARE(sam9x7_aic5, "microchip,sam9x7-aic", sam9x7_aic5_of_init);

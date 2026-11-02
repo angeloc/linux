@@ -1,7 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /**************************************************************************
  *
- * Copyright © 2011-2012 VMware, Inc., Palo Alto, CA., USA
- * All Rights Reserved.
+ * Copyright 2011-2012 VMware, Inc., Palo Alto, CA., USA
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
@@ -27,35 +27,22 @@
 
 #ifndef _VMWGFX_FENCE_H_
 
-#include <linux/fence.h>
+#include <linux/dma-fence.h>
+#include <linux/dma-fence-array.h>
 
 #define VMW_FENCE_WAIT_TIMEOUT (5*HZ)
 
-struct vmw_private;
+struct drm_device;
+struct drm_file;
+struct drm_pending_event;
 
+struct vmw_private;
 struct vmw_fence_manager;
 
-/**
- *
- *
- */
-enum vmw_action_type {
-	VMW_ACTION_EVENT = 0,
-	VMW_ACTION_MAX
-};
-
-struct vmw_fence_action {
-	struct list_head head;
-	enum vmw_action_type type;
-	void (*seq_passed) (struct vmw_fence_action *action);
-	void (*cleanup) (struct vmw_fence_action *action);
-};
-
 struct vmw_fence_obj {
-	struct fence base;
-
+	struct dma_fence base;
+	bool   waiter_added;
 	struct list_head head;
-	struct list_head seq_passed_actions;
 	void (*destroy)(struct vmw_fence_obj *fence);
 };
 
@@ -71,26 +58,24 @@ vmw_fence_obj_unreference(struct vmw_fence_obj **fence_p)
 
 	*fence_p = NULL;
 	if (fence)
-		fence_put(&fence->base);
+		dma_fence_put(&fence->base);
 }
 
 static inline struct vmw_fence_obj *
 vmw_fence_obj_reference(struct vmw_fence_obj *fence)
 {
 	if (fence)
-		fence_get(&fence->base);
+		dma_fence_get(&fence->base);
 	return fence;
 }
 
-extern void vmw_fences_update(struct vmw_fence_manager *fman);
+u32 vmw_fences_update(struct vmw_fence_manager *fman);
 
 extern bool vmw_fence_obj_signaled(struct vmw_fence_obj *fence);
 
 extern int vmw_fence_obj_wait(struct vmw_fence_obj *fence,
 			      bool lazy,
 			      bool interruptible, unsigned long timeout);
-
-extern void vmw_fence_obj_flush(struct vmw_fence_obj *fence);
 
 extern int vmw_fence_create(struct vmw_fence_manager *fman,
 			    uint32_t seqno,

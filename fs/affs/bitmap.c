@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/affs/bitmap.c
  *
@@ -19,7 +20,7 @@ affs_count_free_blocks(struct super_block *sb)
 
 	pr_debug("%s()\n", __func__);
 
-	if (sb->s_flags & MS_RDONLY)
+	if (sb_rdonly(sb))
 		return 0;
 
 	mutex_lock(&AFFS_SB(sb)->s_bmlock);
@@ -45,7 +46,7 @@ affs_free_block(struct super_block *sb, u32 block)
 
 	pr_debug("%s(%u)\n", __func__, block);
 
-	if (block > sbi->s_partition_size)
+	if (!affs_validblock(sb, block))
 		goto err_range;
 
 	blk     = block - sbi->s_reserved;
@@ -124,7 +125,7 @@ affs_alloc_block(struct inode *inode, u32 goal)
 	sb = inode->i_sb;
 	sbi = AFFS_SB(sb);
 
-	pr_debug("balloc(inode=%lu,goal=%u): ", inode->i_ino, goal);
+	pr_debug("balloc(inode=%llu,goal=%u): ", inode->i_ino, goal);
 
 	if (AFFS_I(inode)->i_pa_cnt) {
 		pr_debug("%d\n", AFFS_I(inode)->i_lastalloc+1);
@@ -249,12 +250,12 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 	int i, res = 0;
 	struct affs_sb_info *sbi = AFFS_SB(sb);
 
-	if (*flags & MS_RDONLY)
+	if (*flags & SB_RDONLY)
 		return 0;
 
 	if (!AFFS_ROOT_TAIL(sb, sbi->s_root_bh)->bm_flag) {
 		pr_notice("Bitmap invalid - mounting %s read only\n", sb->s_id);
-		*flags |= MS_RDONLY;
+		*flags |= SB_RDONLY;
 		return 0;
 	}
 
@@ -287,7 +288,7 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 		if (affs_checksum_block(sb, bh)) {
 			pr_warn("Bitmap %u invalid - mounting %s read only.\n",
 				bm->bm_key, sb->s_id);
-			*flags |= MS_RDONLY;
+			*flags |= SB_RDONLY;
 			goto out;
 		}
 		pr_debug("read bitmap block %d: %d\n", blk, bm->bm_key);

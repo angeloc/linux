@@ -1,18 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Kernel/userspace transport abstraction for Hyper-V util driver.
  *
  * Copyright (C) 2015, Vitaly Kuznetsov <vkuznets@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- * NON INFRINGEMENT.  See the GNU General Public License for more
- * details.
- *
  */
 
 #include <linux/slab.h>
@@ -23,7 +13,7 @@
 #include "hv_utils_transport.h"
 
 static DEFINE_SPINLOCK(hvt_list_lock);
-static struct list_head hvt_list = LIST_HEAD_INIT(hvt_list);
+static LIST_HEAD(hvt_list);
 
 static void hvt_reset(struct hvutil_transport *hvt)
 {
@@ -72,6 +62,10 @@ static ssize_t hvt_op_read(struct file *file, char __user *buf,
 	hvt->outmsg = NULL;
 	hvt->outmsg_len = 0;
 
+	if (hvt->on_read)
+		hvt->on_read();
+	hvt->on_read = NULL;
+
 out_unlock:
 	mutex_unlock(&hvt->lock);
 	return ret;
@@ -100,7 +94,7 @@ static ssize_t hvt_op_write(struct file *file, const char __user *buf,
 	return ret ? ret : count;
 }
 
-static unsigned int hvt_op_poll(struct file *file, poll_table *wait)
+static __poll_t hvt_op_poll(struct file *file, poll_table *wait)
 {
 	struct hvutil_transport *hvt;
 
@@ -109,10 +103,10 @@ static unsigned int hvt_op_poll(struct file *file, poll_table *wait)
 	poll_wait(file, &hvt->outmsg_q, wait);
 
 	if (hvt->mode == HVUTIL_TRANSPORT_DESTROY)
-		return POLLERR | POLLHUP;
+		return EPOLLERR | EPOLLHUP;
 
 	if (hvt->outmsg_len > 0)
-		return POLLIN | POLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 
 	return 0;
 }
@@ -135,8 +129,7 @@ static int hvt_op_open(struct inode *inode, struct file *file)
 		 * device gets released.
 		 */
 		hvt->mode = HVUTIL_TRANSPORT_CHARDEV;
-	}
-	else if (hvt->mode == HVUTIL_TRANSPORT_NETLINK) {
+	} else if (hvt->mode == HVUTIL_TRANSPORT_NETLINK) {
 		/*
 		 * We're switching from netlink communication to using char
 		 * device. Issue the reset first.
@@ -178,10 +171,11 @@ static int hvt_op_release(struct inode *inode, struct file *file)
 	 * connects back.
 	 */
 	hvt_reset(hvt);
-	mutex_unlock(&hvt->lock);
 
 	if (mode_old == HVUTIL_TRANSPORT_DESTROY)
-		hvt_transport_free(hvt);
+		complete(&hvt->release);
+
+	mutex_unlock(&hvt->lock);
 
 	return 0;
 }
@@ -200,7 +194,7 @@ static void hvt_cn_callback(struct cn_msg *msg, struct netlink_skb_parms *nsp)
 	}
 	spin_unlock(&hvt_list_lock);
 	if (!hvt_found) {
-		pr_warn("hvt_cn_callback: spurious message received!\n");
+		pr_warn("%s: spurious message received!\n", __func__);
 		return;
 	}
 
@@ -215,11 +209,12 @@ static void hvt_cn_callback(struct cn_msg *msg, struct netlink_skb_parms *nsp)
 	if (hvt->mode == HVUTIL_TRANSPORT_NETLINK)
 		hvt_found->on_msg(msg->data, msg->len);
 	else
-		pr_warn("hvt_cn_callback: unexpected netlink message!\n");
+		pr_warn("%s: unexpected netlink message!\n", __func__);
 	mutex_unlock(&hvt->lock);
 }
 
-int hvutil_transport_send(struct hvutil_transport *hvt, void *msg, int len)
+int hvutil_transport_send(struct hvutil_transport *hvt, void *msg, int len,
+			  void (*on_read_cb)(void))
 {
 	struct cn_msg *cn_msg;
 	int ret = 0;
@@ -237,6 +232,13 @@ int hvutil_transport_send(struct hvutil_transport *hvt, void *msg, int len)
 		memcpy(cn_msg->data, msg, len);
 		ret = cn_netlink_send(cn_msg, 0, 0, GFP_ATOMIC);
 		kfree(cn_msg);
+		/*
+		 * We don't know when netlink messages are delivered but unlike
+		 * in CHARDEV mode we're not blocked and we can send next
+		 * messages right away.
+		 */
+		if (on_read_cb)
+			on_read_cb();
 		return ret;
 	}
 	/* HVUTIL_TRANSPORT_CHARDEV */
@@ -255,9 +257,11 @@ int hvutil_transport_send(struct hvutil_transport *hvt, void *msg, int len)
 	if (hvt->outmsg) {
 		memcpy(hvt->outmsg, msg, len);
 		hvt->outmsg_len = len;
+		hvt->on_read = on_read_cb;
 		wake_up_interruptible(&hvt->outmsg_q);
-	} else
+	} else {
 		ret = -ENOMEM;
+	}
 out_unlock:
 	mutex_unlock(&hvt->lock);
 	return ret;
@@ -270,7 +274,7 @@ struct hvutil_transport *hvutil_transport_init(const char *name,
 {
 	struct hvutil_transport *hvt;
 
-	hvt = kzalloc(sizeof(*hvt), GFP_KERNEL);
+	hvt = kzalloc_obj(*hvt);
 	if (!hvt)
 		return NULL;
 
@@ -291,6 +295,7 @@ struct hvutil_transport *hvutil_transport_init(const char *name,
 
 	init_waitqueue_head(&hvt->outmsg_q);
 	mutex_init(&hvt->lock);
+	init_completion(&hvt->release);
 
 	spin_lock(&hvt_list_lock);
 	list_add(&hvt->list, &hvt_list);
@@ -338,6 +343,8 @@ void hvutil_transport_destroy(struct hvutil_transport *hvt)
 	if (hvt->cn_id.idx > 0 && hvt->cn_id.val > 0)
 		cn_del_callback(&hvt->cn_id);
 
-	if (mode_old != HVUTIL_TRANSPORT_CHARDEV)
-		hvt_transport_free(hvt);
+	if (mode_old == HVUTIL_TRANSPORT_CHARDEV)
+		wait_for_completion(&hvt->release);
+
+	hvt_transport_free(hvt);
 }

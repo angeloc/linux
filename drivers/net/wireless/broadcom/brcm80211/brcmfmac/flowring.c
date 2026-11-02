@@ -1,16 +1,6 @@
-/* Copyright (c) 2014 Broadcom Corporation
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
- * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
- * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+// SPDX-License-Identifier: ISC
+/*
+ * Copyright (c) 2014 Broadcom Corporation
  */
 
 
@@ -36,15 +26,17 @@
 #define BRCMF_FLOWRING_HASH_STA(fifo, ifidx) (fifo + ifidx * 16)
 
 static const u8 brcmf_flowring_prio2fifo[] = {
-	1,
-	0,
 	0,
 	1,
+	1,
+	0,
 	2,
 	2,
 	3,
 	3
 };
+
+static const u8 ALLFFMAC[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
 
 static bool
@@ -153,7 +145,7 @@ u32 brcmf_flowring_create(struct brcmf_flowring *flow, u8 da[ETH_ALEN],
 		if (i == flow->nrofrings)
 			return -ENOMEM;
 
-		ring = kzalloc(sizeof(*ring), GFP_ATOMIC);
+		ring = kzalloc_obj(*ring, GFP_ATOMIC);
 		if (!ring)
 			return -ENOMEM;
 
@@ -234,13 +226,20 @@ static void brcmf_flowring_block(struct brcmf_flowring *flow, u16 flowid,
 
 void brcmf_flowring_delete(struct brcmf_flowring *flow, u16 flowid)
 {
+	struct brcmf_bus *bus_if = dev_get_drvdata(flow->dev);
 	struct brcmf_flowring_ring *ring;
+	struct brcmf_if *ifp;
 	u16 hash_idx;
+	u8 ifidx;
 	struct sk_buff *skb;
 
 	ring = flow->rings[flowid];
 	if (!ring)
 		return;
+
+	ifidx = brcmf_flowring_ifidx_get(flow, flowid);
+	ifp = brcmf_get_ifp(bus_if->drvr, ifidx);
+
 	brcmf_flowring_block(flow, flowid, false);
 	hash_idx = ring->hash_id;
 	flow->hash[hash_idx].ifidx = BRCMF_FLOWRING_INVALID_IFIDX;
@@ -249,7 +248,7 @@ void brcmf_flowring_delete(struct brcmf_flowring *flow, u16 flowid)
 
 	skb = skb_dequeue(&ring->skblist);
 	while (skb) {
-		brcmu_pkt_buf_free_skb(skb);
+		brcmf_txfinalize(ifp, skb, false);
 		skb = skb_dequeue(&ring->skblist);
 	}
 
@@ -361,21 +360,15 @@ struct brcmf_flowring *brcmf_flowring_attach(struct device *dev, u16 nrofrings)
 	struct brcmf_flowring *flow;
 	u32 i;
 
-	flow = kzalloc(sizeof(*flow), GFP_KERNEL);
+	flow = kzalloc_flex(*flow, rings, nrofrings);
 	if (flow) {
-		flow->dev = dev;
 		flow->nrofrings = nrofrings;
+		flow->dev = dev;
 		spin_lock_init(&flow->block_lock);
 		for (i = 0; i < ARRAY_SIZE(flow->addr_mode); i++)
 			flow->addr_mode[i] = ADDR_INDIRECT;
 		for (i = 0; i < ARRAY_SIZE(flow->hash); i++)
 			flow->hash[i].ifidx = BRCMF_FLOWRING_INVALID_IFIDX;
-		flow->rings = kcalloc(nrofrings, sizeof(*flow->rings),
-				      GFP_KERNEL);
-		if (!flow->rings) {
-			kfree(flow);
-			flow = NULL;
-		}
 	}
 
 	return flow;
@@ -401,7 +394,6 @@ void brcmf_flowring_detach(struct brcmf_flowring *flow)
 		search = search->next;
 		kfree(remove);
 	}
-	kfree(flow->rings);
 	kfree(flow);
 }
 
@@ -420,7 +412,6 @@ void brcmf_flowring_configure_addr_mode(struct brcmf_flowring *flow, int ifidx,
 				flowid = flow->hash[i].flowid;
 				if (flow->rings[flowid]->status != RING_OPEN)
 					continue;
-				flow->rings[flowid]->status = RING_CLOSING;
 				brcmf_msgbuf_delete_flowring(drvr, flowid);
 			}
 		}
@@ -459,10 +450,8 @@ void brcmf_flowring_delete_peer(struct brcmf_flowring *flow, int ifidx,
 		if ((sta || (memcmp(hash[i].mac, peer, ETH_ALEN) == 0)) &&
 		    (hash[i].ifidx == ifidx)) {
 			flowid = flow->hash[i].flowid;
-			if (flow->rings[flowid]->status == RING_OPEN) {
-				flow->rings[flowid]->status = RING_CLOSING;
+			if (flow->rings[flowid]->status == RING_OPEN)
 				brcmf_msgbuf_delete_flowring(drvr, flowid);
-			}
 		}
 	}
 
@@ -484,7 +473,7 @@ void brcmf_flowring_add_tdls_peer(struct brcmf_flowring *flow, int ifidx,
 	struct brcmf_flowring_tdls_entry *tdls_entry;
 	struct brcmf_flowring_tdls_entry *search;
 
-	tdls_entry = kzalloc(sizeof(*tdls_entry), GFP_ATOMIC);
+	tdls_entry = kzalloc_obj(*tdls_entry, GFP_ATOMIC);
 	if (tdls_entry == NULL)
 		return;
 
@@ -495,14 +484,18 @@ void brcmf_flowring_add_tdls_peer(struct brcmf_flowring *flow, int ifidx,
 	} else {
 		search = flow->tdls_entry;
 		if (memcmp(search->mac, peer, ETH_ALEN) == 0)
-			return;
+			goto free_entry;
 		while (search->next) {
 			search = search->next;
 			if (memcmp(search->mac, peer, ETH_ALEN) == 0)
-				return;
+				goto free_entry;
 		}
 		search->next = tdls_entry;
 	}
 
 	flow->tdls_active = true;
+	return;
+
+free_entry:
+	kfree(tdls_entry);
 }

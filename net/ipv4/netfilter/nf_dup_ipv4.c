@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * (C) 2007 by Sebastian Claßen <sebastian.classen@freenet.ag>
  * (C) 2007-2010 by Jan Engelhardt <jengelh@medozas.de>
  *
  * Extracted from xt_TEE.c
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 or later, as
- * published by the Free Software Foundation.
  */
 #include <linux/ip.h>
 #include <linux/module.h>
@@ -15,6 +12,7 @@
 #include <linux/skbuff.h>
 #include <linux/netfilter.h>
 #include <net/checksum.h>
+#include <net/flow.h>
 #include <net/icmp.h>
 #include <net/ip.h>
 #include <net/route.h>
@@ -35,7 +33,7 @@ static bool nf_dup_ipv4_route(struct net *net, struct sk_buff *skb,
 		fl4.flowi4_oif = oif;
 
 	fl4.daddr = gw->s_addr;
-	fl4.flowi4_tos = RT_TOS(iph->tos);
+	fl4.flowi4_dscp = ip4h_dscp(iph);
 	fl4.flowi4_scope = RT_SCOPE_UNIVERSE;
 	fl4.flowi4_flags = FLOWI_FLAG_KNOWN_NH;
 	rt = ip_route_output_key(net, &fl4);
@@ -55,8 +53,9 @@ void nf_dup_ipv4(struct net *net, struct sk_buff *skb, unsigned int hooknum,
 {
 	struct iphdr *iph;
 
-	if (this_cpu_read(nf_skb_duplicated))
-		return;
+	local_bh_disable();
+	if (current->in_nf_duplicate)
+		goto out;
 	/*
 	 * Copy the skb, and route the copy. Will later return %XT_CONTINUE for
 	 * the original skb, which should continue on its way as if nothing has
@@ -64,39 +63,37 @@ void nf_dup_ipv4(struct net *net, struct sk_buff *skb, unsigned int hooknum,
 	 */
 	skb = pskb_copy(skb, GFP_ATOMIC);
 	if (skb == NULL)
-		return;
+		goto out;
 
 #if IS_ENABLED(CONFIG_NF_CONNTRACK)
 	/* Avoid counting cloned packets towards the original connection. */
-	nf_conntrack_put(skb->nfct);
-	skb->nfct     = &nf_ct_untracked_get()->ct_general;
-	skb->nfctinfo = IP_CT_NEW;
-	nf_conntrack_get(skb->nfct);
+	nf_reset_ct(skb);
+	nf_ct_set(skb, NULL, IP_CT_UNTRACKED);
 #endif
 	/*
-	 * If we are in PREROUTING/INPUT, the checksum must be recalculated
-	 * since the length could have changed as a result of defragmentation.
-	 *
-	 * We also decrease the TTL to mitigate potential loops between two
-	 * hosts.
+	 * If we are in PREROUTING/INPUT, decrease the TTL to mitigate potential
+	 * loops between two hosts.
 	 *
 	 * Set %IP_DF so that the original source is notified of a potentially
 	 * decreased MTU on the clone route. IPv6 does this too.
+	 *
+	 * IP header checksum will be recalculated at ip_local_out.
 	 */
 	iph = ip_hdr(skb);
 	iph->frag_off |= htons(IP_DF);
 	if (hooknum == NF_INET_PRE_ROUTING ||
 	    hooknum == NF_INET_LOCAL_IN)
 		--iph->ttl;
-	ip_send_check(iph);
 
 	if (nf_dup_ipv4_route(net, skb, gw, oif)) {
-		__this_cpu_write(nf_skb_duplicated, true);
+		current->in_nf_duplicate = true;
 		ip_local_out(net, skb->sk, skb);
-		__this_cpu_write(nf_skb_duplicated, false);
+		current->in_nf_duplicate = false;
 	} else {
 		kfree_skb(skb);
 	}
+out:
+	local_bh_enable();
 }
 EXPORT_SYMBOL_GPL(nf_dup_ipv4);
 

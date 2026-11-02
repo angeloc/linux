@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ImgTec IR Raw Decoder found in PowerDown Controller.
  *
  * Copyright 2010-2014 Imagination Technologies Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
  *
  * This ties into the input subsystem using the RC-core in raw mode. Raw IR
  * signal edges are reported and decoded by generic software decoders.
@@ -40,9 +36,9 @@ static void img_ir_refresh_raw(struct img_ir_priv *priv, u32 irq_status)
 
 	/* report the edge to the IR raw decoders */
 	if (ir_status) /* low */
-		ir_raw_event_store_edge(rc_dev, IR_SPACE);
+		ir_raw_event_store_edge(rc_dev, false);
 	else /* high */
-		ir_raw_event_store_edge(rc_dev, IR_PULSE);
+		ir_raw_event_store_edge(rc_dev, true);
 	ir_raw_event_handle(rc_dev);
 }
 
@@ -67,9 +63,9 @@ void img_ir_isr_raw(struct img_ir_priv *priv, u32 irq_status)
  * order to be assured of the final space. If there are no edges for a certain
  * time we use this timer to emit a final sample to satisfy them.
  */
-static void img_ir_echo_timer(unsigned long arg)
+static void img_ir_echo_timer(struct timer_list *t)
 {
-	struct img_ir_priv *priv = (struct img_ir_priv *)arg;
+	struct img_ir_priv *priv = timer_container_of(priv, t, raw.timer);
 
 	spin_lock_irq(&priv->lock);
 
@@ -107,18 +103,17 @@ int img_ir_probe_raw(struct img_ir_priv *priv)
 	int error;
 
 	/* Set up the echo timer */
-	setup_timer(&raw->timer, img_ir_echo_timer, (unsigned long)priv);
+	timer_setup(&raw->timer, img_ir_echo_timer, 0);
 
 	/* Allocate raw decoder */
-	raw->rdev = rdev = rc_allocate_device();
+	raw->rdev = rdev = rc_allocate_device(RC_DRIVER_IR_RAW);
 	if (!rdev) {
 		dev_err(priv->dev, "cannot allocate raw input device\n");
 		return -ENOMEM;
 	}
 	rdev->priv = priv;
 	rdev->map_name = RC_MAP_EMPTY;
-	rdev->input_name = "IMG Infrared Decoder Raw";
-	rdev->driver_type = RC_DRIVER_IR_RAW;
+	rdev->device_name = "IMG Infrared Decoder Raw";
 
 	/* Register raw decoder */
 	error = rc_register_device(rdev);
@@ -141,6 +136,7 @@ void img_ir_remove_raw(struct img_ir_priv *priv)
 	if (!rdev)
 		return;
 
+	rc_unregister_device(rdev);
 	/* switch off and disable raw (edge) interrupts */
 	spin_lock_irq(&priv->lock);
 	raw->rdev = NULL;
@@ -150,7 +146,7 @@ void img_ir_remove_raw(struct img_ir_priv *priv)
 	img_ir_write(priv, IMG_IR_IRQ_CLEAR, IMG_IR_IRQ_EDGE);
 	spin_unlock_irq(&priv->lock);
 
-	rc_unregister_device(rdev);
+	rc_free_device(rdev);
 
-	del_timer_sync(&raw->timer);
+	timer_delete_sync(&raw->timer);
 }

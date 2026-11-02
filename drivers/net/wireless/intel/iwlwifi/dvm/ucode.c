@@ -1,36 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /******************************************************************************
- *
- * GPL LICENSE SUMMARY
  *
  * Copyright(c) 2008 - 2014 Intel Corporation. All rights reserved.
  * Copyright(c) 2015 Intel Deutschland GmbH
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110,
- * USA
- *
- * The full GNU General Public License is included in this distribution
- * in the file called COPYING.
- *
- * Contact Information:
- *  Intel Linux Wireless <linuxwifi@intel.com>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- *
+ * Copyright (C) 2025-2026 Intel Corporation
  *****************************************************************************/
 
 #include <linux/kernel.h>
 
-#include "iwl-io.h"
 #include "iwl-agn-hw.h"
 #include "iwl-trans.h"
 #include "iwl-fh.h"
@@ -45,15 +22,6 @@
  * uCode download functions
  *
  ******************************************************************************/
-
-static inline const struct fw_img *
-iwl_get_ucode_image(struct iwl_priv *priv, enum iwl_ucode_type ucode_type)
-{
-	if (ucode_type >= IWL_UCODE_TYPE_MAX)
-		return NULL;
-
-	return &priv->fw->img[ucode_type];
-}
 
 /*
  *  Calibration
@@ -254,7 +222,7 @@ static int iwl_alive_notify(struct iwl_priv *priv)
 	int ret;
 	int i;
 
-	iwl_trans_fw_alive(priv->trans, 0);
+	iwl_trans_fw_alive(priv->trans);
 
 	if (priv->fw->ucode_capa.flags & IWL_UCODE_TLV_FLAGS_PAN &&
 	    priv->nvm_data->sku_cap_ipan_enable) {
@@ -325,14 +293,9 @@ int iwl_load_ucode_wait_alive(struct iwl_priv *priv,
 {
 	struct iwl_notification_wait alive_wait;
 	struct iwl_alive_data alive_data;
-	const struct fw_img *fw;
 	int ret;
 	enum iwl_ucode_type old_type;
 	static const u16 alive_cmd[] = { REPLY_ALIVE };
-
-	fw = iwl_get_ucode_image(priv, ucode_type);
-	if (WARN_ON(!fw))
-		return -EINVAL;
 
 	old_type = priv->cur_ucode;
 	priv->cur_ucode = ucode_type;
@@ -342,7 +305,7 @@ int iwl_load_ucode_wait_alive(struct iwl_priv *priv,
 				   alive_cmd, ARRAY_SIZE(alive_cmd),
 				   iwl_alive_fn, &alive_data);
 
-	ret = iwl_trans_start_fw(priv->trans, fw, false);
+	ret = iwl_trans_start_fw(priv->trans, priv->fw, ucode_type, false);
 	if (ret) {
 		priv->cur_ucode = old_type;
 		iwl_remove_notification(&priv->notif_wait, &alive_wait);
@@ -388,18 +351,18 @@ static bool iwlagn_wait_calib(struct iwl_notif_wait_data *notif_wait,
 			      struct iwl_rx_packet *pkt, void *data)
 {
 	struct iwl_priv *priv = data;
-	struct iwl_calib_hdr *hdr;
+	struct iwl_calib_cmd *cmd;
 
 	if (pkt->hdr.cmd != CALIBRATION_RES_NOTIFICATION) {
 		WARN_ON(pkt->hdr.cmd != CALIBRATION_COMPLETE_NOTIFICATION);
 		return true;
 	}
 
-	hdr = (struct iwl_calib_hdr *)pkt->data;
+	cmd = (struct iwl_calib_cmd *)pkt->data;
 
-	if (iwl_calib_set(priv, hdr, iwl_rx_packet_payload_len(pkt)))
+	if (iwl_calib_set(priv, cmd, iwl_rx_packet_payload_len(pkt)))
 		IWL_ERR(priv, "Failed to record calibration data %d\n",
-			hdr->op_code);
+			cmd->hdr.op_code);
 
 	return false;
 }
@@ -416,7 +379,7 @@ int iwl_run_init_ucode(struct iwl_priv *priv)
 	lockdep_assert_held(&priv->mutex);
 
 	/* No init ucode required? Curious, but maybe ok */
-	if (!priv->fw->img[IWL_UCODE_INIT].sec[0].len)
+	if (!priv->fw->img[IWL_UCODE_INIT].num_sec)
 		return 0;
 
 	iwl_init_notification_wait(&priv->notif_wait, &calib_wait,

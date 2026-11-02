@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /************************************************************************
  * Copyright 2003 Digi International (www.digi.com)
  *
  * Copyright (C) 2004 IBM Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY, EXPRESS OR IMPLIED; without even the
- * implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- * PURPOSE.  See the GNU General Public License for more details.
  *
  * Contact Information:
  * Scott H Kilau <Scott_Kilau@digi.com>
@@ -25,10 +16,9 @@
 
 #include "jsm.h"
 
-MODULE_AUTHOR("Digi International, http://www.digi.com");
+MODULE_AUTHOR("Digi International, https://www.digi.com");
 MODULE_DESCRIPTION("Driver for the Digi International Neo and Classic PCI based product line");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("jsm");
 
 #define JSM_DRIVER_NAME "jsm"
 #define NR_PORTS	32
@@ -76,7 +66,7 @@ static int jsm_probe_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto out_disable_device;
 	}
 
-	brd = kzalloc(sizeof(*brd), GFP_KERNEL);
+	brd = kzalloc_obj(*brd);
 	if (!brd) {
 		rc = -ENOMEM;
 		goto out_release_regions;
@@ -221,7 +211,8 @@ static int jsm_probe_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 		break;
 	default:
-		return -ENXIO;
+		rc = -ENXIO;
+		goto out_kfree_brd;
 	}
 
 	rc = request_irq(brd->irq, brd->bd_ops->intr, IRQF_SHARED, "JSM", brd);
@@ -304,26 +295,26 @@ static void jsm_remove_one(struct pci_dev *pdev)
 	kfree(brd);
 }
 
-static struct pci_device_id jsm_pci_tbl[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_NEO_2DB9), 0, 0, 0 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_NEO_2DB9PRI), 0, 0, 1 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_NEO_2RJ45), 0, 0, 2 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_NEO_2RJ45PRI), 0, 0, 3 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCIE_DEVICE_ID_NEO_4_IBM), 0, 0, 4 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_DIGI_NEO_8), 0, 0, 5 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_NEO_4), 0, 0, 6 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_NEO_1_422), 0, 0, 7 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_NEO_1_422_485), 0, 0, 8 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_NEO_2_422_485), 0, 0, 9 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCIE_DEVICE_ID_NEO_8), 0, 0, 10 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCIE_DEVICE_ID_NEO_4), 0, 0, 11 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCIE_DEVICE_ID_NEO_4RJ45), 0, 0, 12 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCIE_DEVICE_ID_NEO_8RJ45), 0, 0, 13 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_CLASSIC_4), 0, 0, 14 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_CLASSIC_4_422), 0, 0, 15 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_CLASSIC_8), 0, 0, 16 },
-	{ PCI_DEVICE(PCI_VENDOR_ID_DIGI, PCI_DEVICE_ID_CLASSIC_8_422), 0, 0, 17 },
-	{ 0, }
+static const struct pci_device_id jsm_pci_tbl[] = {
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_NEO_2DB9) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_NEO_2DB9PRI) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_NEO_2RJ45) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_NEO_2RJ45PRI) },
+	{ PCI_VDEVICE(DIGI, PCIE_DEVICE_ID_NEO_4_IBM) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_DIGI_NEO_8) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_NEO_4) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_NEO_1_422) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_NEO_1_422_485) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_NEO_2_422_485) },
+	{ PCI_VDEVICE(DIGI, PCIE_DEVICE_ID_NEO_8) },
+	{ PCI_VDEVICE(DIGI, PCIE_DEVICE_ID_NEO_4) },
+	{ PCI_VDEVICE(DIGI, PCIE_DEVICE_ID_NEO_4RJ45) },
+	{ PCI_VDEVICE(DIGI, PCIE_DEVICE_ID_NEO_8RJ45) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_CLASSIC_4) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_CLASSIC_4_422) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_CLASSIC_8) },
+	{ PCI_VDEVICE(DIGI, PCI_DEVICE_ID_CLASSIC_8_422) },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, jsm_pci_tbl);
 
@@ -364,7 +355,6 @@ static void jsm_io_resume(struct pci_dev *pdev)
 	struct jsm_board *brd = pci_get_drvdata(pdev);
 
 	pci_restore_state(pdev);
-	pci_save_state(pdev);
 
 	jsm_uart_port_init(brd);
 }

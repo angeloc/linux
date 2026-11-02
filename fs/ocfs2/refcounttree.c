@@ -1,18 +1,8 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  * refcounttree.c
  *
  * Copyright (C) 2009 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 #include <linux/sort.h>
@@ -34,14 +24,16 @@
 #include "xattr.h"
 #include "namei.h"
 #include "ocfs2_trace.h"
+#include "file.h"
+#include "symlink.h"
 
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/slab.h>
 #include <linux/writeback.h>
-#include <linux/pagevec.h>
 #include <linux/swap.h>
 #include <linux/security.h>
+#include <linux/string.h>
 #include <linux/fsnotify.h>
 #include <linux/quotaops.h>
 #include <linux/namei.h>
@@ -124,6 +116,60 @@ static int ocfs2_validate_refcount_block(struct super_block *sb,
 				 le32_to_cpu(rb->rf_fs_generation));
 		goto out;
 	}
+
+	/*
+	 * Refcount blocks are allocated from a per-slot suballocator, so the
+	 * slot must be in range.  Otherwise freeing the block passes it to
+	 * get_local_system_inode(), which hits BUG_ON() for
+	 * OCFS2_INVALID_SLOT or computes an out-of-bounds index otherwise.
+	 */
+	if ((u32)le16_to_cpu(rb->rf_suballoc_slot) >= OCFS2_SB(sb)->max_slots) {
+		rc = ocfs2_error(sb,
+				 "Refcount block #%llu has an invalid rf_suballoc_slot of %u\n",
+				 (unsigned long long)bh->b_blocknr,
+				 le16_to_cpu(rb->rf_suballoc_slot));
+		goto out;
+	}
+
+	/*
+	 * Similarly the suballoc bit must fit in a block group bitmap.
+	 * Otherwise freeing the block will pass the oversized bit to
+	 * _ocfs2_free_suballoc_bits() and trigger ocfs2_error() there.
+	 */
+	if (le16_to_cpu(rb->rf_suballoc_bit) >= ocfs2_suballoc_bits_per_block(sb)) {
+		rc = ocfs2_error(sb,
+				 "Refcount block #%llu has an invalid rf_suballoc_bit of %u\n",
+				 (unsigned long long)bh->b_blocknr,
+				 le16_to_cpu(rb->rf_suballoc_bit));
+		goto out;
+	}
+
+	/*
+	 * rf_records (rl_count/rl_used/rl_recs[]) is only meaningful when
+	 * this block is not an interior tree block (OCFS2_REFCOUNT_TREE_FL);
+	 * in that case the same union bytes hold an extent list (rf_list)
+	 * instead, which is validated by ocfs2_validate_extent_block().
+	 */
+	if (!(le32_to_cpu(rb->rf_flags) & OCFS2_REFCOUNT_TREE_FL)) {
+		if (le16_to_cpu(rb->rf_records.rl_count) !=
+		    ocfs2_refcount_recs_per_rb(sb)) {
+			rc = ocfs2_error(sb,
+					 "Refcount block #%llu has an invalid rl_count of %u\n",
+					 (unsigned long long)bh->b_blocknr,
+					 le16_to_cpu(rb->rf_records.rl_count));
+			goto out;
+		}
+
+		if (le16_to_cpu(rb->rf_records.rl_used) >
+		    le16_to_cpu(rb->rf_records.rl_count)) {
+			rc = ocfs2_error(sb,
+					 "Refcount block #%llu has an invalid rl_used of %u (rl_count %u)\n",
+					 (unsigned long long)bh->b_blocknr,
+					 le16_to_cpu(rb->rf_records.rl_used),
+					 le16_to_cpu(rb->rf_records.rl_count));
+			goto out;
+		}
+	}
 out:
 	return rc;
 }
@@ -161,6 +207,7 @@ ocfs2_refcount_cache_get_super(struct ocfs2_caching_info *ci)
 }
 
 static void ocfs2_refcount_cache_lock(struct ocfs2_caching_info *ci)
+__acquires(&rf->rf_lock)
 {
 	struct ocfs2_refcount_tree *rf = cache_info_to_refcount(ci);
 
@@ -168,6 +215,7 @@ static void ocfs2_refcount_cache_lock(struct ocfs2_caching_info *ci)
 }
 
 static void ocfs2_refcount_cache_unlock(struct ocfs2_caching_info *ci)
+__releases(&rf->rf_lock)
 {
 	struct ocfs2_refcount_tree *rf = cache_info_to_refcount(ci);
 
@@ -316,7 +364,7 @@ ocfs2_allocate_refcount_tree(struct ocfs2_super *osb, u64 rf_blkno)
 {
 	struct ocfs2_refcount_tree *new;
 
-	new = kzalloc(sizeof(struct ocfs2_refcount_tree), GFP_NOFS);
+	new = kzalloc_obj(struct ocfs2_refcount_tree, GFP_NOFS);
 	if (!new)
 		return NULL;
 
@@ -327,8 +375,10 @@ ocfs2_allocate_refcount_tree(struct ocfs2_super *osb, u64 rf_blkno)
 	return new;
 }
 
+/* Callers without the refcount tree lock must request a reference. */
 static int ocfs2_get_refcount_tree(struct ocfs2_super *osb, u64 rf_blkno,
-				   struct ocfs2_refcount_tree **ret_tree)
+				   struct ocfs2_refcount_tree **ret_tree,
+				   bool get_ref)
 {
 	int ret = 0;
 	struct ocfs2_refcount_tree *tree, *new = NULL;
@@ -385,6 +435,8 @@ static int ocfs2_get_refcount_tree(struct ocfs2_super *osb, u64 rf_blkno,
 	new = NULL;
 
 out:
+	if (get_ref)
+		ocfs2_refcount_tree_get(tree);
 	*ret_tree = tree;
 
 	osb->osb_ref_tree_lru = tree;
@@ -410,7 +462,7 @@ static int ocfs2_get_refcount_block(struct inode *inode, u64 *ref_blkno)
 		goto out;
 	}
 
-	BUG_ON(!(OCFS2_I(inode)->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL));
+	BUG_ON(!ocfs2_is_refcount_inode(inode));
 
 	di = (struct ocfs2_dinode *)di_bh->b_data;
 	*ref_blkno = le64_to_cpu(di->i_refcount_loc);
@@ -458,13 +510,11 @@ int ocfs2_lock_refcount_tree(struct ocfs2_super *osb,
 	struct ocfs2_refcount_block *rb;
 
 again:
-	ret = ocfs2_get_refcount_tree(osb, ref_blkno, &tree);
+	ret = ocfs2_get_refcount_tree(osb, ref_blkno, &tree, true);
 	if (ret) {
 		mlog_errno(ret);
 		return ret;
 	}
-
-	ocfs2_refcount_tree_get(tree);
 
 	ret = __ocfs2_lock_refcount_tree(osb, tree, rw);
 	if (ret) {
@@ -478,7 +528,6 @@ again:
 	if (ret) {
 		mlog_errno(ret);
 		ocfs2_unlock_refcount_tree(osb, tree, rw);
-		ocfs2_refcount_tree_put(tree);
 		goto out;
 	}
 
@@ -570,10 +619,10 @@ static int ocfs2_create_refcount_tree(struct inode *inode,
 	u32 num_got;
 	u64 suballoc_loc, first_blkno;
 
-	BUG_ON(oi->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL);
+	BUG_ON(ocfs2_is_refcount_inode(inode));
 
 	trace_ocfs2_create_refcount_tree(
-		(unsigned long long)OCFS2_I(inode)->ip_blkno);
+		(unsigned long long)oi->ip_blkno);
 
 	ret = ocfs2_reserve_new_metadata_blocks(osb, 1, &meta_ac);
 	if (ret) {
@@ -628,7 +677,7 @@ static int ocfs2_create_refcount_tree(struct inode *inode,
 	/* Initialize ocfs2_refcount_block. */
 	rb = (struct ocfs2_refcount_block *)new_bh->b_data;
 	memset(rb, 0, inode->i_sb->s_blocksize);
-	strcpy((void *)rb, OCFS2_REFCOUNT_BLOCK_SIGNATURE);
+	strscpy(rb->rf_signature, OCFS2_REFCOUNT_BLOCK_SIGNATURE);
 	rb->rf_suballoc_slot = cpu_to_le16(meta_ac->ac_alloc_slot);
 	rb->rf_suballoc_loc = cpu_to_le64(suballoc_loc);
 	rb->rf_suballoc_bit = cpu_to_le16(suballoc_bit_start);
@@ -638,7 +687,7 @@ static int ocfs2_create_refcount_tree(struct inode *inode,
 	rb->rf_records.rl_count =
 			cpu_to_le16(ocfs2_refcount_recs_per_rb(osb->sb));
 	spin_lock(&osb->osb_lock);
-	rb->rf_generation = osb->s_next_generation++;
+	rb->rf_generation = cpu_to_le32(osb->s_next_generation++);
 	spin_unlock(&osb->osb_lock);
 
 	ocfs2_journal_dirty(handle, new_bh);
@@ -708,7 +757,7 @@ static int ocfs2_set_refcount_tree(struct inode *inode,
 	struct ocfs2_refcount_block *rb;
 	struct ocfs2_refcount_tree *ref_tree;
 
-	BUG_ON(oi->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL);
+	BUG_ON(ocfs2_is_refcount_inode(inode));
 
 	ret = ocfs2_lock_refcount_tree(osb, refcount_loc, 1,
 				       &ref_tree, &ref_root_bh);
@@ -775,7 +824,7 @@ int ocfs2_remove_refcount_tree(struct inode *inode, struct buffer_head *di_bh)
 	u64 blk = 0, bg_blkno = 0, ref_blkno = le64_to_cpu(di->i_refcount_loc);
 	u16 bit = 0;
 
-	if (!(oi->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL))
+	if (!ocfs2_is_refcount_inode(inode))
 		return 0;
 
 	BUG_ON(!ref_blkno);
@@ -984,7 +1033,7 @@ static int ocfs2_get_refcount_cpos_end(struct ocfs2_caching_info *ci,
 		return 0;
 	}
 
-	if (!eb || (eb && !eb->h_next_leaf_blk)) {
+	if (!eb || !eb->h_next_leaf_blk) {
 		/*
 		 * We are the last extent rec, so any high cpos should
 		 * be stored in this leaf refcount block.
@@ -1069,7 +1118,7 @@ static int ocfs2_get_refcount_rec(struct ocfs2_caching_info *ci,
 				  struct buffer_head **ret_bh)
 {
 	int ret = 0, i, found;
-	u32 low_cpos, uninitialized_var(cpos_end);
+	u32 low_cpos, cpos_end;
 	struct ocfs2_extent_list *el;
 	struct ocfs2_extent_rec *rec = NULL;
 	struct ocfs2_extent_block *eb = NULL;
@@ -1400,13 +1449,6 @@ static int cmp_refcount_rec_by_cpos(const void *a, const void *b)
 	return 0;
 }
 
-static void swap_refcount_rec(void *a, void *b, int size)
-{
-	struct ocfs2_refcount_rec *l = a, *r = b;
-
-	swap(*l, *r);
-}
-
 /*
  * The refcount cpos are ordered by their 64bit cpos,
  * But we will use the low 32 bit to be the e_cpos in the b-tree.
@@ -1482,7 +1524,7 @@ static int ocfs2_divide_leaf_refcount_block(struct buffer_head *ref_leaf_bh,
 	 */
 	sort(&rl->rl_recs, le16_to_cpu(rl->rl_used),
 	     sizeof(struct ocfs2_refcount_rec),
-	     cmp_refcount_rec_by_low_cpos, swap_refcount_rec);
+	     cmp_refcount_rec_by_low_cpos, NULL);
 
 	ret = ocfs2_find_refcount_split_pos(rl, &cpos, &split_index);
 	if (ret) {
@@ -1507,11 +1549,11 @@ static int ocfs2_divide_leaf_refcount_block(struct buffer_head *ref_leaf_bh,
 
 	sort(&rl->rl_recs, le16_to_cpu(rl->rl_used),
 	     sizeof(struct ocfs2_refcount_rec),
-	     cmp_refcount_rec_by_cpos, swap_refcount_rec);
+	     cmp_refcount_rec_by_cpos, NULL);
 
 	sort(&new_rl->rl_recs, le16_to_cpu(new_rl->rl_used),
 	     sizeof(struct ocfs2_refcount_rec),
-	     cmp_refcount_rec_by_cpos, swap_refcount_rec);
+	     cmp_refcount_rec_by_cpos, NULL);
 
 	*split_cpos = cpos;
 	return 0;
@@ -1576,7 +1618,7 @@ static int ocfs2_new_leaf_refcount_block(handle_t *handle,
 	/* Initialize ocfs2_refcount_block. */
 	new_rb = (struct ocfs2_refcount_block *)new_bh->b_data;
 	memset(new_rb, 0, sb->s_blocksize);
-	strcpy((void *)new_rb, OCFS2_REFCOUNT_BLOCK_SIGNATURE);
+	strscpy(new_rb->rf_signature, OCFS2_REFCOUNT_BLOCK_SIGNATURE);
 	new_rb->rf_suballoc_slot = cpu_to_le16(meta_ac->ac_alloc_slot);
 	new_rb->rf_suballoc_loc = cpu_to_le64(suballoc_loc);
 	new_rb->rf_suballoc_bit = cpu_to_le16(suballoc_bit_start);
@@ -2145,10 +2187,15 @@ static int ocfs2_remove_refcount_extent(handle_t *handle,
 		rb->rf_flags = 0;
 		rb->rf_parent = 0;
 		rb->rf_cpos = 0;
-		memset(&rb->rf_records, 0, sb->s_blocksize -
-		       offsetof(struct ocfs2_refcount_block, rf_records));
+		rb->rf_records.rl_used = 0;
+		rb->rf_records.rl_reserved2 = 0;
+		rb->rf_records.rl_reserved1 = 0;
+		/* rl_count determines the memset size and fortify object size. */
 		rb->rf_records.rl_count =
 				cpu_to_le16(ocfs2_refcount_recs_per_rb(sb));
+		memset(rb->rf_records.rl_recs, 0,
+		       le16_to_cpu(rb->rf_records.rl_count) *
+		       sizeof(*rb->rf_records.rl_recs));
 	}
 
 	ocfs2_journal_dirty(handle, ref_root_bh);
@@ -2299,11 +2346,10 @@ int ocfs2_decrease_refcount(struct inode *inode,
 {
 	int ret;
 	u64 ref_blkno;
-	struct ocfs2_inode_info *oi = OCFS2_I(inode);
 	struct buffer_head *ref_root_bh = NULL;
 	struct ocfs2_refcount_tree *tree;
 
-	BUG_ON(!(oi->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL));
+	BUG_ON(!ocfs2_is_refcount_inode(inode));
 
 	ret = ocfs2_get_refcount_block(inode, &ref_blkno);
 	if (ret) {
@@ -2311,7 +2357,8 @@ int ocfs2_decrease_refcount(struct inode *inode,
 		goto out;
 	}
 
-	ret = ocfs2_get_refcount_tree(OCFS2_SB(inode->i_sb), ref_blkno, &tree);
+	ret = ocfs2_get_refcount_tree(OCFS2_SB(inode->i_sb), ref_blkno,
+				      &tree, false);
 	if (ret) {
 		mlog_errno(ret);
 		goto out;
@@ -2355,7 +2402,7 @@ static int ocfs2_mark_extent_refcounted(struct inode *inode,
 					   cpos, len, phys);
 
 	if (!ocfs2_refcount_tree(OCFS2_SB(inode->i_sb))) {
-		ret = ocfs2_error(inode->i_sb, "Inode %lu want to use refcount tree, but the feature bit is not set in the super block\n",
+		ret = ocfs2_error(inode->i_sb, "Inode %llu want to use refcount tree, but the feature bit is not set in the super block\n",
 				  inode->i_ino);
 		goto out;
 	}
@@ -2435,7 +2482,7 @@ static int ocfs2_calc_refcount_meta_credits(struct super_block *sb,
 		 *
 		 * If we will insert a new one, this is easy and only happens
 		 * during adding refcounted flag to the extent, so we don't
-		 * have a chance of spliting. We just need one record.
+		 * have a chance of splitting. We just need one record.
 		 *
 		 * If the refcount rec already exists, that would be a little
 		 * complicated. we may have to:
@@ -2533,21 +2580,20 @@ int ocfs2_prepare_refcount_change_for_del(struct inode *inode,
 					  int *ref_blocks)
 {
 	int ret;
-	struct ocfs2_inode_info *oi = OCFS2_I(inode);
 	struct buffer_head *ref_root_bh = NULL;
 	struct ocfs2_refcount_tree *tree;
 	u64 start_cpos = ocfs2_blocks_to_clusters(inode->i_sb, phys_blkno);
 
 	if (!ocfs2_refcount_tree(OCFS2_SB(inode->i_sb))) {
-		ret = ocfs2_error(inode->i_sb, "Inode %lu want to use refcount tree, but the feature bit is not set in the super block\n",
+		ret = ocfs2_error(inode->i_sb, "Inode %llu want to use refcount tree, but the feature bit is not set in the super block\n",
 				  inode->i_ino);
 		goto out;
 	}
 
-	BUG_ON(!(oi->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL));
+	BUG_ON(!ocfs2_is_refcount_inode(inode));
 
 	ret = ocfs2_get_refcount_tree(OCFS2_SB(inode->i_sb),
-				      refcount_loc, &tree);
+				      refcount_loc, &tree, false);
 	if (ret) {
 		mlog_errno(ret);
 		goto out;
@@ -2624,13 +2670,13 @@ static inline unsigned int ocfs2_cow_align_length(struct super_block *sb,
 }
 
 /*
- * Calculate out the start and number of virtual clusters we need to to CoW.
+ * Calculate out the start and number of virtual clusters we need to CoW.
  *
- * cpos is vitual start cluster position we want to do CoW in a
+ * cpos is virtual start cluster position we want to do CoW in a
  * file and write_len is the cluster length.
  * max_cpos is the place where we want to stop CoW intentionally.
  *
- * Normal we will start CoW from the beginning of extent record cotaining cpos.
+ * Normal we will start CoW from the beginning of extent record containing cpos.
  * We try to break up extents on boundaries of MAX_CONTIG_BYTES so that we
  * get good I/O from the resulting extent tree.
  */
@@ -2665,7 +2711,7 @@ static int ocfs2_refcount_cal_cow_clusters(struct inode *inode,
 
 		if (el->l_tree_depth) {
 			ret = ocfs2_error(inode->i_sb,
-					  "Inode %lu has non zero tree depth in leaf block %llu\n",
+					  "Inode %llu has non zero tree depth in leaf block %llu\n",
 					  inode->i_ino,
 					  (unsigned long long)eb_bh->b_blocknr);
 			goto out;
@@ -2677,7 +2723,7 @@ static int ocfs2_refcount_cal_cow_clusters(struct inode *inode,
 		rec = &el->l_recs[i];
 
 		if (ocfs2_is_empty_extent(rec)) {
-			mlog_bug_on_msg(i != 0, "Inode %lu has empty record in "
+			mlog_bug_on_msg(i != 0, "Inode %llu has empty record in "
 					"index %d\n", inode->i_ino, i);
 			continue;
 		}
@@ -2853,7 +2899,7 @@ static int ocfs2_lock_refcount_allocators(struct super_block *sb,
 					int *credits)
 {
 	int ret = 0, meta_add = 0;
-	int num_free_extents = ocfs2_num_free_extents(OCFS2_SB(sb), et);
+	int num_free_extents = ocfs2_num_free_extents(et);
 
 	if (num_free_extents < 0) {
 		ret = num_free_extents;
@@ -2918,7 +2964,6 @@ int ocfs2_duplicate_clusters_by_page(handle_t *handle,
 	int ret = 0, partial;
 	struct super_block *sb = inode->i_sb;
 	u64 new_block = ocfs2_clusters_to_blocks(sb, new_cluster);
-	struct page *page;
 	pgoff_t page_index;
 	unsigned int from, to;
 	loff_t offset, end, map_end;
@@ -2937,6 +2982,7 @@ int ocfs2_duplicate_clusters_by_page(handle_t *handle,
 		end = i_size_read(inode);
 
 	while (offset < end) {
+		struct folio *folio;
 		page_index = offset >> PAGE_SHIFT;
 		map_end = ((loff_t)page_index + 1) << PAGE_SHIFT;
 		if (map_end > end)
@@ -2948,31 +2994,41 @@ int ocfs2_duplicate_clusters_by_page(handle_t *handle,
 		if (map_end & (PAGE_SIZE - 1))
 			to = map_end & (PAGE_SIZE - 1);
 
-		page = find_or_create_page(mapping, page_index, GFP_NOFS);
-		if (!page) {
-			ret = -ENOMEM;
+retry:
+		folio = __filemap_get_folio(mapping, page_index,
+				FGP_LOCK | FGP_ACCESSED | FGP_CREAT, GFP_NOFS);
+		if (IS_ERR(folio)) {
+			ret = PTR_ERR(folio);
 			mlog_errno(ret);
 			break;
 		}
 
 		/*
-		 * In case PAGE_SIZE <= CLUSTER_SIZE, This page
-		 * can't be dirtied before we CoW it out.
+		 * In case PAGE_SIZE <= CLUSTER_SIZE, we do not expect a dirty
+		 * page, so write it back.
 		 */
-		if (PAGE_SIZE <= OCFS2_SB(sb)->s_clustersize)
-			BUG_ON(PageDirty(page));
+		if (PAGE_SIZE <= OCFS2_SB(sb)->s_clustersize) {
+			if (folio_test_dirty(folio)) {
+				folio_unlock(folio);
+				folio_put(folio);
 
-		if (!PageUptodate(page)) {
-			ret = block_read_full_page(page, ocfs2_get_block);
+				ret = filemap_write_and_wait_range(mapping,
+						offset, map_end - 1);
+				goto retry;
+			}
+		}
+
+		if (!folio_test_uptodate(folio)) {
+			ret = block_read_full_folio(folio, ocfs2_get_block);
 			if (ret) {
 				mlog_errno(ret);
 				goto unlock;
 			}
-			lock_page(page);
+			folio_lock(folio);
 		}
 
-		if (page_has_buffers(page)) {
-			ret = walk_page_buffers(handle, page_buffers(page),
+		if (folio_buffers(folio)) {
+			ret = walk_page_buffers(handle, folio_buffers(folio),
 						from, to, &partial,
 						ocfs2_clear_cow_buffer);
 			if (ret) {
@@ -2981,14 +3037,12 @@ int ocfs2_duplicate_clusters_by_page(handle_t *handle,
 			}
 		}
 
-		ocfs2_map_and_dirty_page(inode,
-					 handle, from, to,
-					 page, 0, &new_block);
-		mark_page_accessed(page);
+		ocfs2_map_and_dirty_folio(inode, handle, from, to,
+				folio, 0, &new_block);
+		folio_mark_accessed(folio);
 unlock:
-		unlock_page(page);
-		put_page(page);
-		page = NULL;
+		folio_unlock(folio);
+		folio_put(folio);
 		offset = map_end;
 		if (ret)
 			break;
@@ -3146,48 +3200,18 @@ int ocfs2_cow_sync_writeback(struct super_block *sb,
 			     struct inode *inode,
 			     u32 cpos, u32 num_clusters)
 {
-	int ret = 0;
-	loff_t offset, end, map_end;
-	pgoff_t page_index;
-	struct page *page;
+	int ret;
+	loff_t start, end;
 
 	if (ocfs2_should_order_data(inode))
 		return 0;
 
-	offset = ((loff_t)cpos) << OCFS2_SB(sb)->s_clustersize_bits;
-	end = offset + (num_clusters << OCFS2_SB(sb)->s_clustersize_bits);
+	start = ((loff_t)cpos) << OCFS2_SB(sb)->s_clustersize_bits;
+	end = start + (num_clusters << OCFS2_SB(sb)->s_clustersize_bits) - 1;
 
-	ret = filemap_fdatawrite_range(inode->i_mapping,
-				       offset, end - 1);
-	if (ret < 0) {
+	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	if (ret < 0)
 		mlog_errno(ret);
-		return ret;
-	}
-
-	while (offset < end) {
-		page_index = offset >> PAGE_SHIFT;
-		map_end = ((loff_t)page_index + 1) << PAGE_SHIFT;
-		if (map_end > end)
-			map_end = end;
-
-		page = find_or_create_page(inode->i_mapping,
-					   page_index, GFP_NOFS);
-		BUG_ON(!page);
-
-		wait_on_page_writeback(page);
-		if (PageError(page)) {
-			ret = -EIO;
-			mlog_errno(ret);
-		} else
-			mark_page_accessed(page);
-
-		unlock_page(page);
-		put_page(page);
-		page = NULL;
-		offset = map_end;
-		if (ret)
-			break;
-	}
 
 	return ret;
 }
@@ -3361,8 +3385,8 @@ static int ocfs2_replace_cow(struct ocfs2_cow_context *context)
 	unsigned int ext_flags;
 	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
 
-	if (!ocfs2_refcount_tree(OCFS2_SB(inode->i_sb))) {
-		return ocfs2_error(inode->i_sb, "Inode %lu want to use refcount tree, but the feature bit is not set in the super block\n",
+	if (!ocfs2_refcount_tree(osb)) {
+		return ocfs2_error(inode->i_sb, "Inode %llu want to use refcount tree, but the feature bit is not set in the super block\n",
 				   inode->i_ino);
 	}
 
@@ -3393,10 +3417,9 @@ static int ocfs2_replace_cow(struct ocfs2_cow_context *context)
 		cow_start += num_clusters;
 	}
 
-	if (ocfs2_dealloc_has_cluster(&context->dealloc)) {
+	if (ocfs2_dealloc_has_cluster(&context->dealloc))
 		ocfs2_schedule_truncate_log_flush(osb, 1);
-		ocfs2_run_deallocs(osb, &context->dealloc);
-	}
+	ocfs2_run_deallocs(osb, &context->dealloc);
 
 	return ret;
 }
@@ -3412,14 +3435,13 @@ static int ocfs2_refcount_cow_hunk(struct inode *inode,
 {
 	int ret;
 	u32 cow_start = 0, cow_len = 0;
-	struct ocfs2_inode_info *oi = OCFS2_I(inode);
 	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
 	struct ocfs2_dinode *di = (struct ocfs2_dinode *)di_bh->b_data;
 	struct buffer_head *ref_root_bh = NULL;
 	struct ocfs2_refcount_tree *ref_tree;
 	struct ocfs2_cow_context *context = NULL;
 
-	BUG_ON(!(oi->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL));
+	BUG_ON(!ocfs2_is_refcount_inode(inode));
 
 	ret = ocfs2_refcount_cal_cow_clusters(inode, &di->id2.i_list,
 					      cpos, write_len, max_cpos,
@@ -3435,7 +3457,7 @@ static int ocfs2_refcount_cow_hunk(struct inode *inode,
 
 	BUG_ON(cow_len == 0);
 
-	context = kzalloc(sizeof(struct ocfs2_cow_context), GFP_NOFS);
+	context = kzalloc_obj(struct ocfs2_cow_context, GFP_NOFS);
 	if (!context) {
 		ret = -ENOMEM;
 		mlog_errno(ret);
@@ -3629,11 +3651,10 @@ int ocfs2_refcount_cow_xattr(struct inode *inode,
 {
 	int ret;
 	struct ocfs2_xattr_value_root *xv = vb->vb_xv;
-	struct ocfs2_inode_info *oi = OCFS2_I(inode);
 	struct ocfs2_cow_context *context = NULL;
 	u32 cow_start, cow_len;
 
-	BUG_ON(!(oi->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL));
+	BUG_ON(!ocfs2_is_refcount_inode(inode));
 
 	ret = ocfs2_refcount_cal_cow_clusters(inode, &xv->xr_list,
 					      cpos, write_len, UINT_MAX,
@@ -3645,7 +3666,7 @@ int ocfs2_refcount_cow_xattr(struct inode *inode,
 
 	BUG_ON(cow_len == 0);
 
-	context = kzalloc(sizeof(struct ocfs2_cow_context), GFP_NOFS);
+	context = kzalloc_obj(struct ocfs2_cow_context, GFP_NOFS);
 	if (!context) {
 		ret = -ENOMEM;
 		mlog_errno(ret);
@@ -3696,6 +3717,9 @@ int ocfs2_add_refcount_flag(struct inode *inode,
 	struct ocfs2_super *osb = OCFS2_SB(inode->i_sb);
 	struct ocfs2_alloc_context *meta_ac = NULL;
 
+	/* We need to be able to handle at least an extent tree split. */
+	ref_blocks = ocfs2_extend_meta_needed(data_et->et_root_el);
+
 	ret = ocfs2_calc_refcount_meta_credits(inode->i_sb,
 					       ref_ci, ref_root_bh,
 					       p_cluster, num_clusters,
@@ -3708,7 +3732,7 @@ int ocfs2_add_refcount_flag(struct inode *inode,
 	trace_ocfs2_add_refcount_flag(ref_blocks, credits);
 
 	if (ref_blocks) {
-		ret = ocfs2_reserve_new_metadata_blocks(OCFS2_SB(inode->i_sb),
+		ret = ocfs2_reserve_new_metadata_blocks(osb,
 							ref_blocks, &meta_ac);
 		if (ret) {
 			mlog_errno(ret);
@@ -3778,9 +3802,9 @@ static int ocfs2_change_ctime(struct inode *inode,
 		goto out_commit;
 	}
 
-	inode->i_ctime = CURRENT_TIME;
-	di->i_ctime = cpu_to_le64(inode->i_ctime.tv_sec);
-	di->i_ctime_nsec = cpu_to_le32(inode->i_ctime.tv_nsec);
+	inode_set_ctime_current(inode);
+	di->i_ctime = cpu_to_le64(inode_get_ctime_sec(inode));
+	di->i_ctime_nsec = cpu_to_le32(inode_get_ctime_nsec(inode));
 
 	ocfs2_journal_dirty(handle, di_bh);
 
@@ -3807,7 +3831,7 @@ static int ocfs2_attach_refcount_tree(struct inode *inode,
 
 	ocfs2_init_dealloc_ctxt(&dealloc);
 
-	if (!(oi->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL)) {
+	if (!ocfs2_is_refcount_inode(inode)) {
 		ret = ocfs2_create_refcount_tree(inode, di_bh);
 		if (ret) {
 			mlog_errno(ret);
@@ -3878,10 +3902,9 @@ unlock:
 	ocfs2_unlock_refcount_tree(osb, ref_tree, 1);
 	brelse(ref_root_bh);
 
-	if (!ret && ocfs2_dealloc_has_cluster(&dealloc)) {
+	if (!ret && ocfs2_dealloc_has_cluster(&dealloc))
 		ocfs2_schedule_truncate_log_flush(osb, 1);
-		ocfs2_run_deallocs(osb, &dealloc);
-	}
+	ocfs2_run_deallocs(osb, &dealloc);
 out:
 	/*
 	 * Empty the extent map so that we may get the right extent
@@ -3934,6 +3957,13 @@ static int ocfs2_add_refcounted_extent(struct inode *inode,
 	ret = ocfs2_increase_refcount(handle, ref_ci, ref_root_bh,
 				      p_cluster, num_clusters,
 				      meta_ac, dealloc);
+	if (ret) {
+		mlog_errno(ret);
+		goto out_commit;
+	}
+
+	ret = dquot_alloc_space_nodirty(inode,
+		ocfs2_clusters_to_bytes(osb->sb, num_clusters));
 	if (ret)
 		mlog_errno(ret);
 
@@ -4094,12 +4124,12 @@ static int ocfs2_complete_reflink(struct inode *s_inode,
 		 * we want mtime to appear identical to the source and
 		 * update ctime.
 		 */
-		t_inode->i_ctime = CURRENT_TIME;
+		inode_set_ctime_current(t_inode);
 
-		di->i_ctime = cpu_to_le64(t_inode->i_ctime.tv_sec);
-		di->i_ctime_nsec = cpu_to_le32(t_inode->i_ctime.tv_nsec);
+		di->i_ctime = cpu_to_le64(inode_get_ctime_sec(t_inode));
+		di->i_ctime_nsec = cpu_to_le32(inode_get_ctime_nsec(t_inode));
 
-		t_inode->i_mtime = s_inode->i_mtime;
+		inode_set_mtime_to_ts(t_inode, inode_get_mtime(s_inode));
 		di->i_mtime = s_di->i_mtime;
 		di->i_mtime_nsec = s_di->i_mtime_nsec;
 	}
@@ -4121,7 +4151,6 @@ static int ocfs2_create_reflink_node(struct inode *s_inode,
 	struct buffer_head *ref_root_bh = NULL;
 	struct ocfs2_cached_dealloc_ctxt dealloc;
 	struct ocfs2_super *osb = OCFS2_SB(s_inode->i_sb);
-	struct ocfs2_refcount_block *rb;
 	struct ocfs2_dinode *di = (struct ocfs2_dinode *)s_bh->b_data;
 	struct ocfs2_refcount_tree *ref_tree;
 
@@ -4148,7 +4177,6 @@ static int ocfs2_create_reflink_node(struct inode *s_inode,
 		mlog_errno(ret);
 		goto out;
 	}
-	rb = (struct ocfs2_refcount_block *)ref_root_bh->b_data;
 
 	ret = ocfs2_duplicate_extent_list(s_inode, t_inode, t_bh,
 					  &ref_tree->rf_ci, ref_root_bh,
@@ -4162,10 +4190,9 @@ out_unlock_refcount:
 	ocfs2_unlock_refcount_tree(osb, ref_tree, 1);
 	brelse(ref_root_bh);
 out:
-	if (ocfs2_dealloc_has_cluster(&dealloc)) {
+	if (ocfs2_dealloc_has_cluster(&dealloc))
 		ocfs2_schedule_truncate_log_flush(osb, 1);
-		ocfs2_run_deallocs(osb, &dealloc);
-	}
+	ocfs2_run_deallocs(osb, &dealloc);
 
 	return ret;
 }
@@ -4178,8 +4205,9 @@ static int __ocfs2_reflink(struct dentry *old_dentry,
 	int ret;
 	struct inode *inode = d_inode(old_dentry);
 	struct buffer_head *new_bh = NULL;
+	struct ocfs2_inode_info *oi = OCFS2_I(inode);
 
-	if (OCFS2_I(inode)->ip_flags & OCFS2_INODE_SYSTEM_FILE) {
+	if (oi->ip_flags & OCFS2_INODE_SYSTEM_FILE) {
 		ret = -EINVAL;
 		mlog_errno(ret);
 		goto out;
@@ -4205,6 +4233,26 @@ static int __ocfs2_reflink(struct dentry *old_dentry,
 		goto out_unlock;
 	}
 
+	if ((oi->ip_dyn_features & OCFS2_HAS_XATTR_FL) &&
+	    (oi->ip_dyn_features & OCFS2_INLINE_XATTR_FL)) {
+		/*
+		 * Adjust extent record count to reserve space for extended attribute.
+		 * Inline data count had been adjusted in ocfs2_duplicate_inline_data().
+		 */
+		struct ocfs2_inode_info *new_oi = OCFS2_I(new_inode);
+
+		if (!(new_oi->ip_dyn_features & OCFS2_INLINE_DATA_FL) &&
+		    !(ocfs2_inode_is_fast_symlink(new_inode))) {
+			struct ocfs2_dinode *new_di = (struct ocfs2_dinode *)new_bh->b_data;
+			struct ocfs2_dinode *old_di = (struct ocfs2_dinode *)old_bh->b_data;
+			struct ocfs2_extent_list *el = &new_di->id2.i_list;
+			int inline_size = le16_to_cpu(old_di->i_xattr_inline_size);
+
+			le16_add_cpu(&el->l_count, -(inline_size /
+					sizeof(struct ocfs2_extent_rec)));
+		}
+	}
+
 	ret = ocfs2_create_reflink_node(inode, old_bh,
 					new_inode, new_bh, preserve);
 	if (ret) {
@@ -4212,7 +4260,7 @@ static int __ocfs2_reflink(struct dentry *old_dentry,
 		goto inode_unlock;
 	}
 
-	if (OCFS2_I(inode)->ip_dyn_features & OCFS2_HAS_XATTR_FL) {
+	if (oi->ip_dyn_features & OCFS2_HAS_XATTR_FL) {
 		ret = ocfs2_reflink_xattrs(inode, old_bh,
 					   new_inode, new_bh,
 					   preserve);
@@ -4244,10 +4292,11 @@ out:
 static int ocfs2_reflink(struct dentry *old_dentry, struct inode *dir,
 			 struct dentry *new_dentry, bool preserve)
 {
-	int error;
+	int error, had_lock;
 	struct inode *inode = d_inode(old_dentry);
 	struct buffer_head *old_bh = NULL;
 	struct inode *new_orphan_inode = NULL;
+	struct ocfs2_lock_holder oh;
 
 	if (!ocfs2_refcount_tree(OCFS2_SB(inode->i_sb)))
 		return -EOPNOTSUPP;
@@ -4289,6 +4338,14 @@ static int ocfs2_reflink(struct dentry *old_dentry, struct inode *dir,
 		goto out;
 	}
 
+	had_lock = ocfs2_inode_lock_tracker(new_orphan_inode, NULL, 1,
+					    &oh);
+	if (had_lock < 0) {
+		error = had_lock;
+		mlog_errno(error);
+		goto out;
+	}
+
 	/* If the security isn't preserved, we need to re-initialize them. */
 	if (!preserve) {
 		error = ocfs2_init_security_and_acl(dir, new_orphan_inode,
@@ -4296,14 +4353,15 @@ static int ocfs2_reflink(struct dentry *old_dentry, struct inode *dir,
 		if (error)
 			mlog_errno(error);
 	}
-out:
 	if (!error) {
 		error = ocfs2_mv_orphaned_inode_to_new(dir, new_orphan_inode,
 						       new_dentry);
 		if (error)
 			mlog_errno(error);
 	}
+	ocfs2_inode_unlock_tracker(new_orphan_inode, 1, &oh, had_lock);
 
+out:
 	if (new_orphan_inode) {
 		/*
 		 * We need to open_unlock the inode no matter whether we
@@ -4330,7 +4388,7 @@ static inline int ocfs2_may_create(struct inode *dir, struct dentry *child)
 		return -EEXIST;
 	if (IS_DEADDIR(dir))
 		return -ENOENT;
-	return inode_permission(dir, MAY_WRITE | MAY_EXEC);
+	return inode_permission(&nop_mnt_idmap, dir, MAY_WRITE | MAY_EXEC);
 }
 
 /**
@@ -4384,7 +4442,7 @@ static int ocfs2_vfs_reflink(struct dentry *old_dentry, struct inode *dir,
 	 * file.
 	 */
 	if (!preserve) {
-		error = inode_permission(inode, MAY_READ);
+		error = inode_permission(&nop_mnt_idmap, inode, MAY_READ);
 		if (error)
 			return error;
 	}
@@ -4419,7 +4477,7 @@ int ocfs2_reflink_ioctl(struct inode *inode,
 		return error;
 	}
 
-	new_dentry = user_path_create(AT_FDCWD, newname, &new_path, 0);
+	new_dentry = start_creating_user_path(AT_FDCWD, newname, &new_path, 0);
 	error = PTR_ERR(new_dentry);
 	if (IS_ERR(new_dentry)) {
 		mlog_errno(error);
@@ -4436,9 +4494,371 @@ int ocfs2_reflink_ioctl(struct inode *inode,
 				  d_inode(new_path.dentry),
 				  new_dentry, preserve);
 out_dput:
-	done_path_create(&new_path, new_dentry);
+	end_creating_path(&new_path, new_dentry);
 out:
 	path_put(&old_path);
 
 	return error;
+}
+
+/* Update destination inode size, if necessary. */
+int ocfs2_reflink_update_dest(struct inode *dest,
+			      struct buffer_head *d_bh,
+			      loff_t newlen)
+{
+	handle_t *handle;
+	int ret;
+
+	dest->i_blocks = ocfs2_inode_sector_count(dest);
+
+	if (newlen <= i_size_read(dest))
+		return 0;
+
+	handle = ocfs2_start_trans(OCFS2_SB(dest->i_sb),
+				   OCFS2_INODE_UPDATE_CREDITS);
+	if (IS_ERR(handle)) {
+		ret = PTR_ERR(handle);
+		mlog_errno(ret);
+		return ret;
+	}
+
+	/* Extend i_size if needed. */
+	spin_lock(&OCFS2_I(dest)->ip_lock);
+	if (newlen > i_size_read(dest))
+		i_size_write(dest, newlen);
+	spin_unlock(&OCFS2_I(dest)->ip_lock);
+	inode_set_mtime_to_ts(dest, inode_set_ctime_current(dest));
+
+	ret = ocfs2_mark_inode_dirty(handle, dest, d_bh);
+	if (ret) {
+		mlog_errno(ret);
+		goto out_commit;
+	}
+
+out_commit:
+	ocfs2_commit_trans(OCFS2_SB(dest->i_sb), handle);
+	return ret;
+}
+
+/* Remap the range pos_in:len in s_inode to pos_out:len in t_inode. */
+static loff_t ocfs2_reflink_remap_extent(struct inode *s_inode,
+					 struct buffer_head *s_bh,
+					 loff_t pos_in,
+					 struct inode *t_inode,
+					 struct buffer_head *t_bh,
+					 loff_t pos_out,
+					 loff_t len,
+					 struct ocfs2_cached_dealloc_ctxt *dealloc)
+{
+	struct ocfs2_extent_tree s_et;
+	struct ocfs2_extent_tree t_et;
+	struct ocfs2_dinode *dis;
+	struct buffer_head *ref_root_bh = NULL;
+	struct ocfs2_refcount_tree *ref_tree;
+	struct ocfs2_super *osb;
+	loff_t remapped_bytes = 0;
+	loff_t pstart, plen;
+	u32 p_cluster, num_clusters, slast, spos, tpos, remapped_clus = 0;
+	unsigned int ext_flags;
+	int ret = 0;
+
+	osb = OCFS2_SB(s_inode->i_sb);
+	dis = (struct ocfs2_dinode *)s_bh->b_data;
+	ocfs2_init_dinode_extent_tree(&s_et, INODE_CACHE(s_inode), s_bh);
+	ocfs2_init_dinode_extent_tree(&t_et, INODE_CACHE(t_inode), t_bh);
+
+	spos = ocfs2_bytes_to_clusters(s_inode->i_sb, pos_in);
+	tpos = ocfs2_bytes_to_clusters(t_inode->i_sb, pos_out);
+	slast = ocfs2_clusters_for_bytes(s_inode->i_sb, pos_in + len);
+
+	while (spos < slast) {
+		if (fatal_signal_pending(current)) {
+			ret = -EINTR;
+			goto out;
+		}
+
+		/* Look up the extent. */
+		ret = ocfs2_get_clusters(s_inode, spos, &p_cluster,
+					 &num_clusters, &ext_flags);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+
+		num_clusters = min_t(u32, num_clusters, slast - spos);
+
+		/* Punch out the dest range. */
+		pstart = ocfs2_clusters_to_bytes(t_inode->i_sb, tpos);
+		plen = ocfs2_clusters_to_bytes(t_inode->i_sb, num_clusters);
+		ret = ocfs2_remove_inode_range(t_inode, t_bh, pstart, plen);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+
+		if (p_cluster == 0)
+			goto next_loop;
+
+		/* Lock the refcount btree... */
+		ret = ocfs2_lock_refcount_tree(osb,
+					       le64_to_cpu(dis->i_refcount_loc),
+					       1, &ref_tree, &ref_root_bh);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+
+		/* Mark s_inode's extent as refcounted. */
+		if (!(ext_flags & OCFS2_EXT_REFCOUNTED)) {
+			ret = ocfs2_add_refcount_flag(s_inode, &s_et,
+						      &ref_tree->rf_ci,
+						      ref_root_bh, spos,
+						      p_cluster, num_clusters,
+						      dealloc, NULL);
+			if (ret) {
+				mlog_errno(ret);
+				goto out_unlock_refcount;
+			}
+		}
+
+		/* Map in the new extent. */
+		ext_flags |= OCFS2_EXT_REFCOUNTED;
+		ret = ocfs2_add_refcounted_extent(t_inode, &t_et,
+						  &ref_tree->rf_ci,
+						  ref_root_bh,
+						  tpos, p_cluster,
+						  num_clusters,
+						  ext_flags,
+						  dealloc);
+		if (ret) {
+			mlog_errno(ret);
+			goto out_unlock_refcount;
+		}
+
+		ocfs2_unlock_refcount_tree(osb, ref_tree, 1);
+		brelse(ref_root_bh);
+next_loop:
+		spos += num_clusters;
+		tpos += num_clusters;
+		remapped_clus += num_clusters;
+	}
+
+	goto out;
+out_unlock_refcount:
+	ocfs2_unlock_refcount_tree(osb, ref_tree, 1);
+	brelse(ref_root_bh);
+out:
+	remapped_bytes = ocfs2_clusters_to_bytes(t_inode->i_sb, remapped_clus);
+	remapped_bytes = min_t(loff_t, len, remapped_bytes);
+
+	return remapped_bytes > 0 ? remapped_bytes : ret;
+}
+
+/* Set up refcount tree and remap s_inode to t_inode. */
+loff_t ocfs2_reflink_remap_blocks(struct inode *s_inode,
+				  struct buffer_head *s_bh,
+				  loff_t pos_in,
+				  struct inode *t_inode,
+				  struct buffer_head *t_bh,
+				  loff_t pos_out,
+				  loff_t len)
+{
+	struct ocfs2_cached_dealloc_ctxt dealloc;
+	struct ocfs2_super *osb;
+	struct ocfs2_dinode *dis;
+	struct ocfs2_dinode *dit;
+	loff_t ret;
+
+	osb = OCFS2_SB(s_inode->i_sb);
+	dis = (struct ocfs2_dinode *)s_bh->b_data;
+	dit = (struct ocfs2_dinode *)t_bh->b_data;
+	ocfs2_init_dealloc_ctxt(&dealloc);
+
+	/*
+	 * If we're reflinking the entire file and the source is inline
+	 * data, just copy the contents.
+	 */
+	if (pos_in == pos_out && pos_in == 0 && len == i_size_read(s_inode) &&
+	    i_size_read(t_inode) <= len &&
+	    (OCFS2_I(s_inode)->ip_dyn_features & OCFS2_INLINE_DATA_FL)) {
+		ret = ocfs2_duplicate_inline_data(s_inode, s_bh, t_inode, t_bh);
+		if (ret)
+			mlog_errno(ret);
+		goto out;
+	}
+
+	/*
+	 * If both inodes belong to two different refcount groups then
+	 * forget it because we don't know how (or want) to go merging
+	 * refcount trees.
+	 */
+	ret = -EOPNOTSUPP;
+	if (ocfs2_is_refcount_inode(s_inode) &&
+	    ocfs2_is_refcount_inode(t_inode) &&
+	    le64_to_cpu(dis->i_refcount_loc) !=
+	    le64_to_cpu(dit->i_refcount_loc))
+		goto out;
+
+	/* Neither inode has a refcount tree.  Add one to s_inode. */
+	if (!ocfs2_is_refcount_inode(s_inode) &&
+	    !ocfs2_is_refcount_inode(t_inode)) {
+		ret = ocfs2_create_refcount_tree(s_inode, s_bh);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+	}
+
+	/* Ensure that both inodes end up with the same refcount tree. */
+	if (!ocfs2_is_refcount_inode(s_inode)) {
+		ret = ocfs2_set_refcount_tree(s_inode, s_bh,
+					      le64_to_cpu(dit->i_refcount_loc));
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+	}
+	if (!ocfs2_is_refcount_inode(t_inode)) {
+		ret = ocfs2_set_refcount_tree(t_inode, t_bh,
+					      le64_to_cpu(dis->i_refcount_loc));
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+	}
+
+	/* Turn off inline data in the dest file. */
+	if (OCFS2_I(t_inode)->ip_dyn_features & OCFS2_INLINE_DATA_FL) {
+		ret = ocfs2_convert_inline_data_to_extents(t_inode, t_bh);
+		if (ret) {
+			mlog_errno(ret);
+			goto out;
+		}
+	}
+
+	/* Actually remap extents now. */
+	ret = ocfs2_reflink_remap_extent(s_inode, s_bh, pos_in, t_inode, t_bh,
+					 pos_out, len, &dealloc);
+	if (ret < 0) {
+		mlog_errno(ret);
+		goto out;
+	}
+
+out:
+	if (ocfs2_dealloc_has_cluster(&dealloc))
+		ocfs2_schedule_truncate_log_flush(osb, 1);
+	ocfs2_run_deallocs(osb, &dealloc);
+
+	return ret;
+}
+
+/* Lock an inode and grab a bh pointing to the inode. */
+int ocfs2_reflink_inodes_lock(struct inode *s_inode,
+			      struct buffer_head **bh_s,
+			      struct inode *t_inode,
+			      struct buffer_head **bh_t)
+{
+	struct inode *inode1 = s_inode;
+	struct inode *inode2 = t_inode;
+	struct ocfs2_inode_info *oi1;
+	struct ocfs2_inode_info *oi2;
+	struct buffer_head *bh1 = NULL;
+	struct buffer_head *bh2 = NULL;
+	bool same_inode = (s_inode == t_inode);
+	bool need_swap = (inode1->i_ino > inode2->i_ino);
+	int status;
+
+	/* First grab the VFS and rw locks. */
+	lock_two_nondirectories(s_inode, t_inode);
+	if (need_swap)
+		swap(inode1, inode2);
+
+	status = ocfs2_rw_lock(inode1, 1);
+	if (status) {
+		mlog_errno(status);
+		goto out_i1;
+	}
+	if (!same_inode) {
+		status = ocfs2_rw_lock(inode2, 1);
+		if (status) {
+			mlog_errno(status);
+			goto out_i2;
+		}
+	}
+
+	/* Now go for the cluster locks */
+	oi1 = OCFS2_I(inode1);
+	oi2 = OCFS2_I(inode2);
+
+	trace_ocfs2_double_lock((unsigned long long)oi1->ip_blkno,
+				(unsigned long long)oi2->ip_blkno);
+
+	/* We always want to lock the one with the lower lockid first. */
+	if (oi1->ip_blkno > oi2->ip_blkno)
+		mlog_errno(-ENOLCK);
+
+	/* lock id1 */
+	status = ocfs2_inode_lock_nested(inode1, &bh1, 1,
+					 OI_LS_REFLINK_TARGET);
+	if (status < 0) {
+		if (status != -ENOENT)
+			mlog_errno(status);
+		goto out_rw2;
+	}
+
+	/* lock id2 */
+	if (!same_inode) {
+		status = ocfs2_inode_lock_nested(inode2, &bh2, 1,
+						 OI_LS_REFLINK_TARGET);
+		if (status < 0) {
+			if (status != -ENOENT)
+				mlog_errno(status);
+			goto out_cl1;
+		}
+	} else {
+		bh2 = bh1;
+	}
+
+	/*
+	 * If we swapped inode order above, we have to swap the buffer heads
+	 * before passing them back to the caller.
+	 */
+	if (need_swap)
+		swap(bh1, bh2);
+	*bh_s = bh1;
+	*bh_t = bh2;
+
+	trace_ocfs2_double_lock_end(
+			(unsigned long long)oi1->ip_blkno,
+			(unsigned long long)oi2->ip_blkno);
+
+	return 0;
+
+out_cl1:
+	ocfs2_inode_unlock(inode1, 1);
+	brelse(bh1);
+out_rw2:
+	ocfs2_rw_unlock(inode2, 1);
+out_i2:
+	ocfs2_rw_unlock(inode1, 1);
+out_i1:
+	unlock_two_nondirectories(s_inode, t_inode);
+	return status;
+}
+
+/* Unlock both inodes and release buffers. */
+void ocfs2_reflink_inodes_unlock(struct inode *s_inode,
+				 struct buffer_head *s_bh,
+				 struct inode *t_inode,
+				 struct buffer_head *t_bh)
+{
+	ocfs2_inode_unlock(s_inode, 1);
+	ocfs2_rw_unlock(s_inode, 1);
+	brelse(s_bh);
+	if (s_inode != t_inode) {
+		ocfs2_inode_unlock(t_inode, 1);
+		ocfs2_rw_unlock(t_inode, 1);
+		brelse(t_bh);
+	}
+	unlock_two_nondirectories(s_inode, t_inode);
 }

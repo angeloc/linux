@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * exynos-nocp.c - EXYNOS NoC (Network On Chip) Probe support
+ * exynos-nocp.c - Exynos NoC (Network On Chip) Probe support
  *
  * Copyright (c) 2016 Samsung Electronics Co., Ltd.
  * Author : Chanwoo Choi <cw00.choi@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -176,9 +173,6 @@ static int exynos_nocp_get_event(struct devfreq_event_dev *edev,
 	return 0;
 
 out:
-	edata->load_count = 0;
-	edata->total_count = 0;
-
 	dev_err(nocp->dev, "Failed to read the counter of NoC probe device\n");
 
 	return ret;
@@ -193,6 +187,7 @@ static const struct of_device_id exynos_nocp_id_match[] = {
 	{ .compatible = "samsung,exynos5420-nocp", },
 	{ /* sentinel */ },
 };
+MODULE_DEVICE_TABLE(of, exynos_nocp_id_match);
 
 static struct regmap_config exynos_nocp_regmap_config = {
 	.reg_bits = 32,
@@ -219,8 +214,7 @@ static int exynos_nocp_parse_dt(struct platform_device *pdev,
 		nocp->clk = NULL;
 
 	/* Maps the memory mapped IO to control nocp register */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	base = devm_ioremap_resource(dev, res);
+	base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
@@ -269,7 +263,11 @@ static int exynos_nocp_probe(struct platform_device *pdev)
 	}
 	platform_set_drvdata(pdev, nocp);
 
-	clk_prepare_enable(nocp->clk);
+	ret = clk_prepare_enable(nocp->clk);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to prepare ppmu clock\n");
+		return ret;
+	}
 
 	pr_info("exynos-nocp: new NoC Probe device registered: %s\n",
 			dev_name(dev));
@@ -277,18 +275,16 @@ static int exynos_nocp_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int exynos_nocp_remove(struct platform_device *pdev)
+static void exynos_nocp_remove(struct platform_device *pdev)
 {
 	struct exynos_nocp *nocp = platform_get_drvdata(pdev);
 
 	clk_disable_unprepare(nocp->clk);
-
-	return 0;
 }
 
 static struct platform_driver exynos_nocp_driver = {
 	.probe	= exynos_nocp_probe,
-	.remove	= exynos_nocp_remove,
+	.remove = exynos_nocp_remove,
 	.driver = {
 		.name	= "exynos-nocp",
 		.of_match_table = exynos_nocp_id_match,

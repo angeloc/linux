@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * fs/kernfs/symlink.c - kernfs symlink implementation
  *
  * Copyright (c) 2001-3 Patrick Mochel
  * Copyright (c) 2007 SUSE Linux Products GmbH
  * Copyright (c) 2007, 2013 Tejun Heo <tj@kernel.org>
- *
- * This file is released under the GPLv2.
  */
 
 #include <linux/fs.h>
@@ -20,7 +19,8 @@
  * @name: name of the symlink
  * @target: target node for the symlink to point to
  *
- * Returns the created node on success, ERR_PTR() value on error.
+ * Return: the created node on success, ERR_PTR() value on error.
+ * Ownership of the link matches ownership of the target.
  */
 struct kernfs_node *kernfs_create_link(struct kernfs_node *parent,
 				       const char *name,
@@ -28,8 +28,26 @@ struct kernfs_node *kernfs_create_link(struct kernfs_node *parent,
 {
 	struct kernfs_node *kn;
 	int error;
+	kuid_t uid = GLOBAL_ROOT_UID;
+	kgid_t gid = GLOBAL_ROOT_GID;
 
-	kn = kernfs_new_node(parent, name, S_IFLNK|S_IRWXUGO, KERNFS_LINK);
+	/*
+	 * A symlink takes its owner from its target, so both fields have to
+	 * come from the same moment: read them under kernfs_iattr_rwsem, or
+	 * a chown of the target racing this could leave the link with the
+	 * old uid and the new gid.  The section ends before kernfs_add_one()
+	 * takes kernfs_rwsem.
+	 */
+	scoped_guard(rwsem_read, &kernfs_root(target)->kernfs_iattr_rwsem) {
+		struct kernfs_iattrs *attrs = READ_ONCE(target->iattr);
+
+		if (attrs) {
+			uid = attrs->ia_uid;
+			gid = attrs->ia_gid;
+		}
+	}
+
+	kn = kernfs_new_node(parent, name, S_IFLNK|0777, uid, gid, KERNFS_LINK);
 	if (!kn)
 		return ERR_PTR(-ENOMEM);
 
@@ -55,59 +73,65 @@ static int kernfs_get_target_path(struct kernfs_node *parent,
 
 	/* go up to the root, stop at the base */
 	base = parent;
-	while (base->parent) {
-		kn = target->parent;
-		while (kn->parent && base != kn)
-			kn = kn->parent;
+	while (kernfs_parent(base)) {
+		kn = kernfs_parent(target);
+		while (kernfs_parent(kn) && base != kn)
+			kn = kernfs_parent(kn);
 
 		if (base == kn)
 			break;
 
-		strcpy(s, "../");
+		if ((s - path) + 3 >= PATH_MAX)
+			return -ENAMETOOLONG;
+
+		memcpy(s, "../", 4);
 		s += 3;
-		base = base->parent;
+		base = kernfs_parent(base);
 	}
 
 	/* determine end of target string for reverse fillup */
 	kn = target;
-	while (kn->parent && kn != base) {
-		len += strlen(kn->name) + 1;
-		kn = kn->parent;
+	while (kernfs_parent(kn) && kn != base) {
+		len += strlen(kernfs_rcu_name(kn)) + 1;
+		kn = kernfs_parent(kn);
 	}
 
 	/* check limits */
 	if (len < 2)
 		return -EINVAL;
 	len--;
-	if ((s - path) + len > PATH_MAX)
+	if ((s - path) + len >= PATH_MAX)
 		return -ENAMETOOLONG;
 
 	/* reverse fillup of target string from target to base */
 	kn = target;
-	while (kn->parent && kn != base) {
-		int slen = strlen(kn->name);
+	while (kernfs_parent(kn) && kn != base) {
+		const char *name = kernfs_rcu_name(kn);
+		int slen = strlen(name);
 
 		len -= slen;
-		strncpy(s + len, kn->name, slen);
+		memcpy(s + len, name, slen);
 		if (len)
 			s[--len] = '/';
 
-		kn = kn->parent;
+		kn = kernfs_parent(kn);
 	}
 
 	return 0;
 }
 
-static int kernfs_getlink(struct dentry *dentry, char *path)
+static int kernfs_getlink(struct inode *inode, char *path)
 {
-	struct kernfs_node *kn = dentry->d_fsdata;
-	struct kernfs_node *parent = kn->parent;
+	struct kernfs_node *kn = inode->i_private;
+	struct kernfs_node *parent;
 	struct kernfs_node *target = kn->symlink.target_kn;
+	struct kernfs_root *root = kernfs_root(kn);
 	int error;
 
-	mutex_lock(&kernfs_mutex);
+	down_read(&root->kernfs_rwsem);
+	parent = kernfs_parent(kn);
 	error = kernfs_get_target_path(parent, target, path);
-	mutex_unlock(&kernfs_mutex);
+	up_read(&root->kernfs_rwsem);
 
 	return error;
 }
@@ -124,7 +148,7 @@ static const char *kernfs_iop_get_link(struct dentry *dentry,
 	body = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!body)
 		return ERR_PTR(-ENOMEM);
-	error = kernfs_getlink(dentry, body);
+	error = kernfs_getlink(inode, body);
 	if (unlikely(error < 0)) {
 		kfree(body);
 		return ERR_PTR(error);
@@ -134,11 +158,7 @@ static const char *kernfs_iop_get_link(struct dentry *dentry,
 }
 
 const struct inode_operations kernfs_symlink_iops = {
-	.setxattr	= kernfs_iop_setxattr,
-	.removexattr	= kernfs_iop_removexattr,
-	.getxattr	= kernfs_iop_getxattr,
 	.listxattr	= kernfs_iop_listxattr,
-	.readlink	= generic_readlink,
 	.get_link	= kernfs_iop_get_link,
 	.setattr	= kernfs_iop_setattr,
 	.getattr	= kernfs_iop_getattr,

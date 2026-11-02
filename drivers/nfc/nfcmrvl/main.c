@@ -1,25 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Marvell NFC driver: major functions
  *
  * Copyright (C) 2014-2015 Marvell International Ltd.
- *
- * This software file (the "File") is distributed by Marvell International
- * Ltd. under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available on the worldwide web at
- * http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
  */
 
 #include <linux/module.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/delay.h>
-#include <linux/of_gpio.h>
+#include <linux/of.h>
 #include <linux/nfc.h>
 #include <net/nfc/nci.h>
 #include <net/nfc/nci_core.h>
@@ -68,7 +57,7 @@ static int nfcmrvl_nci_send(struct nci_dev *ndev, struct sk_buff *skb)
 		unsigned char *hdr;
 		unsigned char len = skb->len;
 
-		hdr = (char *) skb_push(skb, NFCMRVL_HCI_EVENT_HEADER_SIZE);
+		hdr = skb_push(skb, NFCMRVL_HCI_EVENT_HEADER_SIZE);
 		hdr[0] = NFCMRVL_HCI_COMMAND_CODE;
 		hdr[1] = NFCMRVL_HCI_OGF;
 		hdr[2] = NFCMRVL_HCI_OCF;
@@ -92,7 +81,7 @@ static int nfcmrvl_nci_fw_download(struct nci_dev *ndev,
 	return nfcmrvl_fw_dnld_start(ndev, firmware_name);
 }
 
-static struct nci_ops nfcmrvl_nci_ops = {
+static const struct nci_ops nfcmrvl_nci_ops = {
 	.open = nfcmrvl_nci_open,
 	.close = nfcmrvl_nci_close,
 	.send = nfcmrvl_nci_send,
@@ -102,9 +91,9 @@ static struct nci_ops nfcmrvl_nci_ops = {
 
 struct nfcmrvl_private *nfcmrvl_nci_register_dev(enum nfcmrvl_phy phy,
 				void *drv_data,
-				struct nfcmrvl_if_ops *ops,
+				const struct nfcmrvl_if_ops *ops,
 				struct device *dev,
-				struct nfcmrvl_platform_data *pdata)
+				const struct nfcmrvl_platform_data *pdata)
 {
 	struct nfcmrvl_private *priv;
 	int rc;
@@ -112,7 +101,7 @@ struct nfcmrvl_private *nfcmrvl_nci_register_dev(enum nfcmrvl_phy phy,
 	int tailroom;
 	u32 protocols;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return ERR_PTR(-ENOMEM);
 
@@ -123,13 +112,13 @@ struct nfcmrvl_private *nfcmrvl_nci_register_dev(enum nfcmrvl_phy phy,
 
 	memcpy(&priv->config, pdata, sizeof(*pdata));
 
-	if (priv->config.reset_n_io) {
-		rc = devm_gpio_request_one(dev,
-					   priv->config.reset_n_io,
-					   GPIOF_OUT_INIT_LOW,
-					   "nfcmrvl_reset_n");
-		if (rc < 0)
-			nfc_err(dev, "failed to request reset_n io\n");
+	if (!priv->config.reset_gpio) {
+		priv->config.reset_gpio =
+			devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+		if (IS_ERR(priv->config.reset_gpio)) {
+			priv->config.reset_gpio = NULL;
+			nfc_err(dev, "failed to get reset gpio\n");
+		}
 	}
 
 	if (phy == NFCMRVL_PHY_SPI) {
@@ -154,19 +143,8 @@ struct nfcmrvl_private *nfcmrvl_nci_register_dev(enum nfcmrvl_phy phy,
 	if (!priv->ndev) {
 		nfc_err(dev, "nci_allocate_device failed\n");
 		rc = -ENOMEM;
-		goto error;
+		goto error_free;
 	}
-
-	nci_set_drvdata(priv->ndev, priv);
-
-	rc = nci_register_device(priv->ndev);
-	if (rc) {
-		nfc_err(dev, "nci_register_device failed %d\n", rc);
-		goto error_free_dev;
-	}
-
-	/* Ensure that controller is powered off */
-	nfcmrvl_chip_halt(priv);
 
 	rc = nfcmrvl_fw_dnld_init(priv);
 	if (rc) {
@@ -174,12 +152,25 @@ struct nfcmrvl_private *nfcmrvl_nci_register_dev(enum nfcmrvl_phy phy,
 		goto error_free_dev;
 	}
 
+	nci_set_drvdata(priv->ndev, priv);
+
+	rc = nci_register_device(priv->ndev);
+	if (rc) {
+		nfc_err(dev, "nci_register_device failed %d\n", rc);
+		goto error_fw_dnld_deinit;
+	}
+
+	/* Ensure that controller is powered off */
+	nfcmrvl_chip_halt(priv);
+
 	nfc_info(dev, "registered with nci successfully\n");
 	return priv;
 
+error_fw_dnld_deinit:
+	nfcmrvl_fw_dnld_deinit(priv);
 error_free_dev:
 	nci_free_device(priv->ndev);
-error:
+error_free:
 	kfree(priv);
 	return ERR_PTR(rc);
 }
@@ -189,15 +180,12 @@ void nfcmrvl_nci_unregister_dev(struct nfcmrvl_private *priv)
 {
 	struct nci_dev *ndev = priv->ndev;
 
+	nci_unregister_device(ndev);
 	if (priv->ndev->nfc_dev->fw_download_in_progress)
 		nfcmrvl_fw_dnld_abort(priv);
 
 	nfcmrvl_fw_dnld_deinit(priv);
 
-	if (priv->config.reset_n_io)
-		devm_gpio_free(priv->dev, priv->config.reset_n_io);
-
-	nci_unregister_device(ndev);
 	nci_free_device(ndev);
 	kfree(priv);
 }
@@ -239,40 +227,26 @@ void nfcmrvl_chip_reset(struct nfcmrvl_private *priv)
 	/* Reset possible fault of previous session */
 	clear_bit(NFCMRVL_PHY_ERROR, &priv->flags);
 
-	if (priv->config.reset_n_io) {
+	if (priv->config.reset_gpio) {
 		nfc_info(priv->dev, "reset the chip\n");
-		gpio_set_value(priv->config.reset_n_io, 0);
+		gpiod_set_value(priv->config.reset_gpio, 1);
 		usleep_range(5000, 10000);
-		gpio_set_value(priv->config.reset_n_io, 1);
+		gpiod_set_value(priv->config.reset_gpio, 0);
 	} else
 		nfc_info(priv->dev, "no reset available on this interface\n");
 }
 
 void nfcmrvl_chip_halt(struct nfcmrvl_private *priv)
 {
-	if (priv->config.reset_n_io)
-		gpio_set_value(priv->config.reset_n_io, 0);
+	if (priv->config.reset_gpio)
+		gpiod_set_value(priv->config.reset_gpio, 1);
 }
 
 int nfcmrvl_parse_dt(struct device_node *node,
 		     struct nfcmrvl_platform_data *pdata)
 {
-	int reset_n_io;
-
-	reset_n_io = of_get_named_gpio(node, "reset-n-io", 0);
-	if (reset_n_io < 0) {
-		pr_info("no reset-n-io config\n");
-		reset_n_io = 0;
-	} else if (!gpio_is_valid(reset_n_io)) {
-		pr_err("invalid reset-n-io GPIO\n");
-		return reset_n_io;
-	}
-	pdata->reset_n_io = reset_n_io;
-
-	if (of_find_property(node, "hci-muxed", NULL))
-		pdata->hci_muxed = 1;
-	else
-		pdata->hci_muxed = 0;
+	pdata->reset_gpio = NULL;
+	pdata->hci_muxed = of_property_read_bool(node, "hci-muxed");
 
 	return 0;
 }

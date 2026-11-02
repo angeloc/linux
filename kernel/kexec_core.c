@@ -1,13 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * kexec.c - kexec system call core code.
  * Copyright (C) 2002-2004 Eric Biederman  <ebiederm@xmission.com>
- *
- * This source code is licensed under the GNU General Public License,
- * Version 2.  See the file COPYING for more details.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/btf.h>
 #include <linux/capability.h>
 #include <linux/mm.h>
 #include <linux/file.h>
@@ -16,6 +15,7 @@
 #include <linux/kexec.h>
 #include <linux/mutex.h>
 #include <linux/list.h>
+#include <linux/liveupdate.h>
 #include <linux/highmem.h>
 #include <linux/syscalls.h>
 #include <linux/reboot.h>
@@ -23,11 +23,13 @@
 #include <linux/hardirq.h>
 #include <linux/elf.h>
 #include <linux/elfcore.h>
+#include <linux/export.h>
 #include <linux/utsname.h>
 #include <linux/numa.h>
 #include <linux/suspend.h>
 #include <linux/device.h>
 #include <linux/freezer.h>
+#include <linux/panic_notifier.h>
 #include <linux/pm.h>
 #include <linux/cpu.h>
 #include <linux/uaccess.h>
@@ -38,68 +40,28 @@
 #include <linux/syscore_ops.h>
 #include <linux/compiler.h>
 #include <linux/hugetlb.h>
+#include <linux/objtool.h>
+#include <linux/kmsg_dump.h>
+#include <linux/dma-map-ops.h>
+#include <linux/sysfs.h>
 
 #include <asm/page.h>
 #include <asm/sections.h>
 
-#include <crypto/hash.h>
-#include <crypto/sha.h>
 #include "kexec_internal.h"
 
-DEFINE_MUTEX(kexec_mutex);
-
-/* Per cpu memory for storing cpu states in case of system crash. */
-note_buf_t __percpu *crash_notes;
-
-/* vmcoreinfo stuff */
-static unsigned char vmcoreinfo_data[VMCOREINFO_BYTES];
-u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
-size_t vmcoreinfo_size;
-size_t vmcoreinfo_max_size = sizeof(vmcoreinfo_data);
+atomic_t __kexec_lock = ATOMIC_INIT(0);
 
 /* Flag to indicate we are going to kexec a new kernel */
 bool kexec_in_progress = false;
 
-
-/* Location of the reserved area for the crash kernel */
-struct resource crashk_res = {
-	.name  = "Crash kernel",
-	.start = 0,
-	.end   = 0,
-	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
-	.desc  = IORES_DESC_CRASH_KERNEL
-};
-struct resource crashk_low_res = {
-	.name  = "Crash kernel",
-	.start = 0,
-	.end   = 0,
-	.flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM,
-	.desc  = IORES_DESC_CRASH_KERNEL
-};
-
-int kexec_should_crash(struct task_struct *p)
+bool kexec_is_in_progress(void)
 {
-	/*
-	 * If crash_kexec_post_notifiers is enabled, don't run
-	 * crash_kexec() here yet, which must be run after panic
-	 * notifiers in panic().
-	 */
-	if (crash_kexec_post_notifiers)
-		return 0;
-	/*
-	 * There are 4 panic() calls in do_exit() path, each of which
-	 * corresponds to each of these 4 conditions.
-	 */
-	if (in_interrupt() || !p->pid || is_global_init(p) || panic_on_oops)
-		return 1;
-	return 0;
+	return kexec_in_progress;
 }
+EXPORT_SYMBOL_GPL(kexec_is_in_progress);
 
-int kexec_crash_loaded(void)
-{
-	return !!kexec_crash_image;
-}
-EXPORT_SYMBOL_GPL(kexec_crash_loaded);
+bool kexec_file_dbg_print;
 
 /*
  * When kexec transitions to the new kernel there is a one-to-one
@@ -116,7 +78,7 @@ EXPORT_SYMBOL_GPL(kexec_crash_loaded);
  * defined more restrictively in <asm/kexec.h>.
  *
  * The code for the transition from the current kernel to the
- * the new kernel is placed in the control_code_buffer, whose size
+ * new kernel is placed in the control_code_buffer, whose size
  * is given by KEXEC_CONTROL_PAGE_SIZE.  In the best case only a single
  * page of memory is necessary, but some architectures require more.
  * Because this memory must be identity mapped in the transition from
@@ -157,6 +119,7 @@ int sanity_check_segment_list(struct kimage *image)
 	int i;
 	unsigned long nr_segments = image->nr_segments;
 	unsigned long total_pages = 0;
+	unsigned long nr_pages = totalram_pages();
 
 	/*
 	 * Verify we have good destination addresses.  The caller is
@@ -222,15 +185,16 @@ int sanity_check_segment_list(struct kimage *image)
 	 * wasted allocating pages, which can cause a soft lockup.
 	 */
 	for (i = 0; i < nr_segments; i++) {
-		if (PAGE_COUNT(image->segment[i].memsz) > totalram_pages / 2)
+		if (PAGE_COUNT(image->segment[i].memsz) > nr_pages / 2)
 			return -EINVAL;
 
 		total_pages += PAGE_COUNT(image->segment[i].memsz);
 	}
 
-	if (total_pages > totalram_pages / 2)
+	if (total_pages > nr_pages / 2)
 		return -EINVAL;
 
+#ifdef CONFIG_CRASH_DUMP
 	/*
 	 * Verify we have good destination addresses.  Normally
 	 * the caller is responsible for making certain we don't
@@ -253,6 +217,27 @@ int sanity_check_segment_list(struct kimage *image)
 				return -EADDRNOTAVAIL;
 		}
 	}
+#endif
+
+	/*
+	 * Reject destinations that land on hardware-poisoned memory: the
+	 * relocation copy would machine-check on the bad frame.
+	 */
+	for (i = 0; i < nr_segments; i++) {
+		if (range_first_hwpoison(image->segment[i].mem,
+					 image->segment[i].memsz) != PHYS_ADDR_MAX)
+			return -EHWPOISON;
+	}
+
+	/*
+	 * The destination addresses are searched from system RAM rather than
+	 * being allocated from the buddy allocator, so they are not guaranteed
+	 * to be accepted by the current kernel.  Accept the destination
+	 * addresses before kexec swaps their content with the segments' source
+	 * pages to avoid accessing memory before it is accepted.
+	 */
+	for (i = 0; i < nr_segments; i++)
+		accept_memory(image->segment[i].mem, image->segment[i].memsz);
 
 	return 0;
 }
@@ -262,11 +247,10 @@ struct kimage *do_kimage_alloc_init(void)
 	struct kimage *image;
 
 	/* Allocate a controlling structure */
-	image = kzalloc(sizeof(*image), GFP_KERNEL);
+	image = kzalloc_obj(*image);
 	if (!image)
 		return NULL;
 
-	image->head = 0;
 	image->entry = &image->head;
 	image->last_entry = &image->head;
 	image->control_page = ~0; /* By default this does not apply */
@@ -281,6 +265,12 @@ struct kimage *do_kimage_alloc_init(void)
 	/* Initialize the list of unusable pages */
 	INIT_LIST_HEAD(&image->unusable_pages);
 
+#ifdef CONFIG_CRASH_HOTPLUG
+	image->hp_action = KEXEC_CRASH_HP_NONE;
+	image->elfcorehdr_index = -1;
+	image->elfcorehdr_updated = false;
+#endif
+
 	return image;
 }
 
@@ -294,8 +284,8 @@ int kimage_is_destination_range(struct kimage *image,
 		unsigned long mstart, mend;
 
 		mstart = image->segment[i].mem;
-		mend = mstart + image->segment[i].memsz;
-		if ((end > mstart) && (start < mend))
+		mend = mstart + image->segment[i].memsz - 1;
+		if ((end >= mstart) && (start <= mend))
 			return 1;
 	}
 
@@ -306,7 +296,9 @@ static struct page *kimage_alloc_pages(gfp_t gfp_mask, unsigned int order)
 {
 	struct page *pages;
 
-	pages = alloc_pages(gfp_mask, order);
+	if (fatal_signal_pending(current))
+		return NULL;
+	pages = alloc_pages(gfp_mask & ~__GFP_ZERO, order);
 	if (pages) {
 		unsigned int count, i;
 
@@ -315,6 +307,13 @@ static struct page *kimage_alloc_pages(gfp_t gfp_mask, unsigned int order)
 		count = 1 << order;
 		for (i = 0; i < count; i++)
 			SetPageReserved(pages + i);
+
+		arch_kexec_post_alloc_pages(page_address(pages), count,
+					    gfp_mask);
+
+		if (gfp_mask & __GFP_ZERO)
+			for (i = 0; i < count; i++)
+				clear_highpage(pages + i);
 	}
 
 	return pages;
@@ -326,6 +325,9 @@ static void kimage_free_pages(struct page *page)
 
 	order = page_private(page);
 	count = 1 << order;
+
+	arch_kexec_pre_free_pages(page_address(page), count);
+
 	for (i = 0; i < count; i++)
 		ClearPageReserved(page + i);
 	__free_pages(page, order);
@@ -376,7 +378,7 @@ static struct page *kimage_alloc_normal_control_pages(struct kimage *image,
 		pfn   = page_to_boot_pfn(pages);
 		epfn  = pfn + count;
 		addr  = pfn << PAGE_SHIFT;
-		eaddr = epfn << PAGE_SHIFT;
+		eaddr = (epfn << PAGE_SHIFT) - 1;
 		if ((epfn >= (KEXEC_CONTROL_MEMORY_LIMIT >> PAGE_SHIFT)) ||
 			      kimage_is_destination_range(image, addr, eaddr)) {
 			list_add(&pages->lru, &extra_pages);
@@ -407,6 +409,7 @@ static struct page *kimage_alloc_normal_control_pages(struct kimage *image,
 	return pages;
 }
 
+#ifdef CONFIG_CRASH_DUMP
 static struct page *kimage_alloc_crash_control_pages(struct kimage *image,
 						      unsigned int order)
 {
@@ -436,10 +439,12 @@ static struct page *kimage_alloc_crash_control_pages(struct kimage *image,
 
 	pages = NULL;
 	size = (1 << order) << PAGE_SHIFT;
-	hole_start = (image->control_page + (size - 1)) & ~(size - 1);
+	hole_start = ALIGN(image->control_page, size);
 	hole_end   = hole_start + size - 1;
 	while (hole_end <= crashk_res.end) {
 		unsigned long i;
+
+		cond_resched();
 
 		if (hole_end > KEXEC_CRASH_CONTROL_MEMORY_LIMIT)
 			break;
@@ -451,7 +456,7 @@ static struct page *kimage_alloc_crash_control_pages(struct kimage *image,
 			mend   = mstart + image->segment[i].memsz - 1;
 			if ((hole_end >= mstart) && (hole_start <= mend)) {
 				/* Advance the hole to the end of the segment */
-				hole_start = (mend + (size - 1)) & ~(size - 1);
+				hole_start = ALIGN(mend, size);
 				hole_end   = hole_start + size - 1;
 				break;
 			}
@@ -459,13 +464,18 @@ static struct page *kimage_alloc_crash_control_pages(struct kimage *image,
 		/* If I don't overlap any segments I have found my hole! */
 		if (i == image->nr_segments) {
 			pages = pfn_to_page(hole_start >> PAGE_SHIFT);
-			image->control_page = hole_end;
+			image->control_page = hole_end + 1;
 			break;
 		}
 	}
 
+	/* Ensure that these pages are decrypted if SME is enabled. */
+	if (pages)
+		arch_kexec_post_alloc_pages(page_address(pages), 1 << order, 0);
+
 	return pages;
 }
+#endif
 
 
 struct page *kimage_alloc_control_pages(struct kimage *image,
@@ -477,9 +487,11 @@ struct page *kimage_alloc_control_pages(struct kimage *image,
 	case KEXEC_TYPE_DEFAULT:
 		pages = kimage_alloc_normal_control_pages(image, order);
 		break;
+#ifdef CONFIG_CRASH_DUMP
 	case KEXEC_TYPE_CRASH:
 		pages = kimage_alloc_crash_control_pages(image, order);
 		break;
+#endif
 	}
 
 	return pages;
@@ -514,23 +526,17 @@ static int kimage_add_entry(struct kimage *image, kimage_entry_t entry)
 static int kimage_set_destination(struct kimage *image,
 				   unsigned long destination)
 {
-	int result;
-
 	destination &= PAGE_MASK;
-	result = kimage_add_entry(image, destination | IND_DESTINATION);
 
-	return result;
+	return kimage_add_entry(image, destination | IND_DESTINATION);
 }
 
 
 static int kimage_add_page(struct kimage *image, unsigned long page)
 {
-	int result;
-
 	page &= PAGE_MASK;
-	result = kimage_add_entry(image, page | IND_SOURCE);
 
-	return result;
+	return kimage_add_entry(image, page | IND_SOURCE);
 }
 
 
@@ -543,6 +549,7 @@ static void kimage_free_extra_pages(struct kimage *image)
 	kimage_free_page_list(&image->unusable_pages);
 
 }
+
 void kimage_terminate(struct kimage *image)
 {
 	if (*image->entry != 0)
@@ -564,6 +571,24 @@ static void kimage_free_entry(kimage_entry_t entry)
 	kimage_free_pages(page);
 }
 
+static void kimage_free_cma(struct kimage *image)
+{
+	unsigned long i;
+
+	for (i = 0; i < image->nr_segments; i++) {
+		struct page *cma = image->segment_cma[i];
+		u32 nr_pages = image->segment[i].memsz >> PAGE_SHIFT;
+
+		if (!cma)
+			continue;
+
+		arch_kexec_pre_free_pages(page_address(cma), nr_pages);
+		dma_release_from_contiguous(NULL, cma, nr_pages);
+		image->segment_cma[i] = NULL;
+	}
+
+}
+
 void kimage_free(struct kimage *image)
 {
 	kimage_entry_t *ptr, entry;
@@ -571,6 +596,13 @@ void kimage_free(struct kimage *image)
 
 	if (!image)
 		return;
+
+#ifdef CONFIG_CRASH_DUMP
+	if (image->vmcoreinfo_data_copy) {
+		crash_update_vmcoreinfo_safecopy(NULL);
+		vunmap(image->vmcoreinfo_data_copy);
+	}
+#endif
 
 	kimage_free_extra_pages(image);
 	for_each_kimage_entry(image, ptr, entry) {
@@ -594,6 +626,9 @@ void kimage_free(struct kimage *image)
 
 	/* Free the kexec control pages... */
 	kimage_free_page_list(&image->control_pages);
+
+	/* Free CMA allocations */
+	kimage_free_cma(image);
 
 	/*
 	 * Free up any temporary buffers allocated. This might hit if
@@ -682,7 +717,7 @@ static struct page *kimage_alloc_page(struct kimage *image,
 
 		/* If the page is not a destination page use it */
 		if (!kimage_is_destination_range(image, addr,
-						  addr + PAGE_SIZE))
+						  addr + PAGE_SIZE - 1))
 			break;
 
 		/*
@@ -710,7 +745,6 @@ static struct page *kimage_alloc_page(struct kimage *image,
 				kimage_free_pages(old_page);
 				continue;
 			}
-			addr = old_addr;
 			page = old_page;
 			break;
 		}
@@ -721,16 +755,70 @@ static struct page *kimage_alloc_page(struct kimage *image,
 	return page;
 }
 
-static int kimage_load_normal_segment(struct kimage *image,
-					 struct kexec_segment *segment)
+static int kimage_load_cma_segment(struct kimage *image, int idx)
 {
+	struct kexec_segment *segment = &image->segment[idx];
+	struct page *cma = image->segment_cma[idx];
+	char *ptr = page_address(cma);
+	size_t ubytes, mbytes;
+	int result = 0;
+	unsigned char __user *buf = NULL;
+	unsigned char *kbuf = NULL;
+
+	if (image->file_mode)
+		kbuf = segment->kbuf;
+	else
+		buf = segment->buf;
+	ubytes = segment->bufsz;
+	mbytes = segment->memsz;
+
+	/* Then copy from source buffer to the CMA one */
+	while (mbytes) {
+		size_t uchunk, mchunk;
+
+		mchunk = min_t(size_t, mbytes, PAGE_SIZE);
+		uchunk = min(ubytes, mchunk);
+
+		if (uchunk) {
+			/* For file based kexec, source pages are in kernel memory */
+			if (image->file_mode)
+				memcpy(ptr, kbuf, uchunk);
+			else
+				result = copy_from_user(ptr, buf, uchunk);
+			ubytes -= uchunk;
+			if (image->file_mode)
+				kbuf += uchunk;
+			else
+				buf += uchunk;
+		}
+
+		if (result) {
+			result = -EFAULT;
+			goto out;
+		}
+
+		ptr    += mchunk;
+		mbytes -= mchunk;
+
+		cond_resched();
+	}
+
+	/* Clear any remainder */
+	memset(ptr, 0, mbytes);
+
+out:
+	return result;
+}
+
+static int kimage_load_normal_segment(struct kimage *image, int idx)
+{
+	struct kexec_segment *segment = &image->segment[idx];
 	unsigned long maddr;
 	size_t ubytes, mbytes;
 	int result;
 	unsigned char __user *buf = NULL;
 	unsigned char *kbuf = NULL;
 
-	result = 0;
 	if (image->file_mode)
 		kbuf = segment->kbuf;
 	else
@@ -738,6 +826,9 @@ static int kimage_load_normal_segment(struct kimage *image,
 	ubytes = segment->bufsz;
 	mbytes = segment->memsz;
 	maddr = segment->mem;
+
+	if (image->segment_cma[idx])
+		return kimage_load_cma_segment(image, idx);
 
 	result = kimage_set_destination(image, maddr);
 	if (result < 0)
@@ -758,43 +849,46 @@ static int kimage_load_normal_segment(struct kimage *image,
 		if (result < 0)
 			goto out;
 
-		ptr = kmap(page);
+		ptr = kmap_local_page(page);
 		/* Start with a clear page */
 		clear_page(ptr);
-		ptr += maddr & ~PAGE_MASK;
-		mchunk = min_t(size_t, mbytes,
-				PAGE_SIZE - (maddr & ~PAGE_MASK));
+		mchunk = min_t(size_t, mbytes, PAGE_SIZE);
 		uchunk = min(ubytes, mchunk);
 
-		/* For file based kexec, source pages are in kernel memory */
-		if (image->file_mode)
-			memcpy(ptr, kbuf, uchunk);
-		else
-			result = copy_from_user(ptr, buf, uchunk);
-		kunmap(page);
+		if (uchunk) {
+			/* For file based kexec, source pages are in kernel memory */
+			if (image->file_mode)
+				memcpy(ptr, kbuf, uchunk);
+			else
+				result = copy_from_user(ptr, buf, uchunk);
+			ubytes -= uchunk;
+			if (image->file_mode)
+				kbuf += uchunk;
+			else
+				buf += uchunk;
+		}
+		kunmap_local(ptr);
 		if (result) {
 			result = -EFAULT;
 			goto out;
 		}
-		ubytes -= uchunk;
 		maddr  += mchunk;
-		if (image->file_mode)
-			kbuf += mchunk;
-		else
-			buf += mchunk;
 		mbytes -= mchunk;
+
+		cond_resched();
 	}
 out:
 	return result;
 }
 
-static int kimage_load_crash_segment(struct kimage *image,
-					struct kexec_segment *segment)
+#ifdef CONFIG_CRASH_DUMP
+static int kimage_load_crash_segment(struct kimage *image, int idx)
 {
 	/* For crash dumps kernels we simply copy the data from
 	 * user space to it's destination.
 	 * We do things a page at a time for the sake of kmap.
 	 */
+	struct kexec_segment *segment = &image->segment[idx];
 	unsigned long maddr;
 	size_t ubytes, mbytes;
 	int result;
@@ -819,668 +913,240 @@ static int kimage_load_crash_segment(struct kimage *image,
 			result  = -ENOMEM;
 			goto out;
 		}
-		ptr = kmap(page);
-		ptr += maddr & ~PAGE_MASK;
-		mchunk = min_t(size_t, mbytes,
-				PAGE_SIZE - (maddr & ~PAGE_MASK));
+		arch_kexec_post_alloc_pages(page_address(page), 1, 0);
+		ptr = kmap_local_page(page);
+		mchunk = min_t(size_t, mbytes, PAGE_SIZE);
 		uchunk = min(ubytes, mchunk);
 		if (mchunk > uchunk) {
 			/* Zero the trailing part of the page */
 			memset(ptr + uchunk, 0, mchunk - uchunk);
 		}
 
-		/* For file based kexec, source pages are in kernel memory */
-		if (image->file_mode)
-			memcpy(ptr, kbuf, uchunk);
-		else
-			result = copy_from_user(ptr, buf, uchunk);
+		if (uchunk) {
+			/* For file based kexec, source pages are in kernel memory */
+			if (image->file_mode)
+				memcpy(ptr, kbuf, uchunk);
+			else
+				result = copy_from_user(ptr, buf, uchunk);
+			ubytes -= uchunk;
+			if (image->file_mode)
+				kbuf += uchunk;
+			else
+				buf += uchunk;
+		}
 		kexec_flush_icache_page(page);
-		kunmap(page);
+		kunmap_local(ptr);
+		arch_kexec_pre_free_pages(page_address(page), 1);
 		if (result) {
 			result = -EFAULT;
 			goto out;
 		}
-		ubytes -= uchunk;
 		maddr  += mchunk;
-		if (image->file_mode)
-			kbuf += mchunk;
-		else
-			buf += mchunk;
 		mbytes -= mchunk;
+
+		cond_resched();
 	}
 out:
 	return result;
 }
+#endif
 
-int kimage_load_segment(struct kimage *image,
-				struct kexec_segment *segment)
+int kimage_load_segment(struct kimage *image, int idx)
 {
 	int result = -ENOMEM;
 
 	switch (image->type) {
 	case KEXEC_TYPE_DEFAULT:
-		result = kimage_load_normal_segment(image, segment);
+		result = kimage_load_normal_segment(image, idx);
 		break;
+#ifdef CONFIG_CRASH_DUMP
 	case KEXEC_TYPE_CRASH:
-		result = kimage_load_crash_segment(image, segment);
+		result = kimage_load_crash_segment(image, idx);
 		break;
+#endif
 	}
 
 	return result;
 }
 
-struct kimage *kexec_image;
-struct kimage *kexec_crash_image;
-int kexec_load_disabled;
-
-/*
- * No panic_cpu check version of crash_kexec().  This function is called
- * only when panic_cpu holds the current CPU number; this is the only CPU
- * which processes crash_kexec routines.
- */
-void __crash_kexec(struct pt_regs *regs)
+void *kimage_map_segment(struct kimage *image, int idx)
 {
-	/* Take the kexec_mutex here to prevent sys_kexec_load
-	 * running on one cpu from replacing the crash kernel
-	 * we are using after a panic on a different cpu.
-	 *
-	 * If the crash kernel was not located in a fixed area
-	 * of memory the xchg(&kexec_crash_image) would be
-	 * sufficient.  But since I reuse the memory...
-	 */
-	if (mutex_trylock(&kexec_mutex)) {
-		if (kexec_crash_image) {
-			struct pt_regs fixed_regs;
+	unsigned long addr, size, eaddr;
+	unsigned long src_page_addr, dest_page_addr = 0;
+	kimage_entry_t *ptr, entry;
+	struct page **src_pages;
+	unsigned int npages;
+	struct page *cma;
+	void *vaddr = NULL;
+	int i;
 
-			crash_setup_regs(&fixed_regs, regs);
-			crash_save_vmcoreinfo();
-			machine_crash_shutdown(&fixed_regs);
-			machine_kexec(kexec_crash_image);
-		}
-		mutex_unlock(&kexec_mutex);
-	}
-}
+	cma = image->segment_cma[idx];
+	if (cma)
+		return page_address(cma);
 
-void crash_kexec(struct pt_regs *regs)
-{
-	int old_cpu, this_cpu;
-
+	addr = image->segment[idx].mem;
+	size = image->segment[idx].memsz;
+	eaddr = addr + size;
 	/*
-	 * Only one CPU is allowed to execute the crash_kexec() code as with
-	 * panic().  Otherwise parallel calls of panic() and crash_kexec()
-	 * may stop each other.  To exclude them, we use panic_cpu here too.
+	 * Collect the source pages and map them in a contiguous VA range.
 	 */
-	this_cpu = raw_smp_processor_id();
-	old_cpu = atomic_cmpxchg(&panic_cpu, PANIC_CPU_INVALID, this_cpu);
-	if (old_cpu == PANIC_CPU_INVALID) {
-		/* This is the 1st CPU which comes here, so go ahead. */
-		printk_nmi_flush_on_panic();
-		__crash_kexec(regs);
-
-		/*
-		 * Reset panic_cpu to allow another panic()/crash_kexec()
-		 * call.
-		 */
-		atomic_set(&panic_cpu, PANIC_CPU_INVALID);
-	}
-}
-
-size_t crash_get_memory_size(void)
-{
-	size_t size = 0;
-
-	mutex_lock(&kexec_mutex);
-	if (crashk_res.end != crashk_res.start)
-		size = resource_size(&crashk_res);
-	mutex_unlock(&kexec_mutex);
-	return size;
-}
-
-void __weak crash_free_reserved_phys_range(unsigned long begin,
-					   unsigned long end)
-{
-	unsigned long addr;
-
-	for (addr = begin; addr < end; addr += PAGE_SIZE)
-		free_reserved_page(boot_pfn_to_page(addr >> PAGE_SHIFT));
-}
-
-int crash_shrink_memory(unsigned long new_size)
-{
-	int ret = 0;
-	unsigned long start, end;
-	unsigned long old_size;
-	struct resource *ram_res;
-
-	mutex_lock(&kexec_mutex);
-
-	if (kexec_crash_image) {
-		ret = -ENOENT;
-		goto unlock;
-	}
-	start = crashk_res.start;
-	end = crashk_res.end;
-	old_size = (end == 0) ? 0 : end - start + 1;
-	if (new_size >= old_size) {
-		ret = (new_size == old_size) ? 0 : -EINVAL;
-		goto unlock;
+	npages = PFN_UP(eaddr) - PFN_DOWN(addr);
+	src_pages = kmalloc_objs(*src_pages, npages);
+	if (!src_pages) {
+		pr_err("Could not allocate ima pages array.\n");
+		return NULL;
 	}
 
-	ram_res = kzalloc(sizeof(*ram_res), GFP_KERNEL);
-	if (!ram_res) {
-		ret = -ENOMEM;
-		goto unlock;
-	}
-
-	start = roundup(start, KEXEC_CRASH_MEM_ALIGN);
-	end = roundup(start + new_size, KEXEC_CRASH_MEM_ALIGN);
-
-	crash_free_reserved_phys_range(end, crashk_res.end);
-
-	if ((start == end) && (crashk_res.parent != NULL))
-		release_resource(&crashk_res);
-
-	ram_res->start = end;
-	ram_res->end = crashk_res.end;
-	ram_res->flags = IORESOURCE_BUSY | IORESOURCE_SYSTEM_RAM;
-	ram_res->name = "System RAM";
-
-	crashk_res.end = end - 1;
-
-	insert_resource(&iomem_resource, ram_res);
-
-unlock:
-	mutex_unlock(&kexec_mutex);
-	return ret;
-}
-
-static u32 *append_elf_note(u32 *buf, char *name, unsigned type, void *data,
-			    size_t data_len)
-{
-	struct elf_note note;
-
-	note.n_namesz = strlen(name) + 1;
-	note.n_descsz = data_len;
-	note.n_type   = type;
-	memcpy(buf, &note, sizeof(note));
-	buf += (sizeof(note) + 3)/4;
-	memcpy(buf, name, note.n_namesz);
-	buf += (note.n_namesz + 3)/4;
-	memcpy(buf, data, note.n_descsz);
-	buf += (note.n_descsz + 3)/4;
-
-	return buf;
-}
-
-static void final_note(u32 *buf)
-{
-	struct elf_note note;
-
-	note.n_namesz = 0;
-	note.n_descsz = 0;
-	note.n_type   = 0;
-	memcpy(buf, &note, sizeof(note));
-}
-
-void crash_save_cpu(struct pt_regs *regs, int cpu)
-{
-	struct elf_prstatus prstatus;
-	u32 *buf;
-
-	if ((cpu < 0) || (cpu >= nr_cpu_ids))
-		return;
-
-	/* Using ELF notes here is opportunistic.
-	 * I need a well defined structure format
-	 * for the data I pass, and I need tags
-	 * on the data to indicate what information I have
-	 * squirrelled away.  ELF notes happen to provide
-	 * all of that, so there is no need to invent something new.
-	 */
-	buf = (u32 *)per_cpu_ptr(crash_notes, cpu);
-	if (!buf)
-		return;
-	memset(&prstatus, 0, sizeof(prstatus));
-	prstatus.pr_pid = current->pid;
-	elf_core_copy_kernel_regs(&prstatus.pr_reg, regs);
-	buf = append_elf_note(buf, KEXEC_CORE_NOTE_NAME, NT_PRSTATUS,
-			      &prstatus, sizeof(prstatus));
-	final_note(buf);
-}
-
-static int __init crash_notes_memory_init(void)
-{
-	/* Allocate memory for saving cpu registers. */
-	size_t size, align;
-
-	/*
-	 * crash_notes could be allocated across 2 vmalloc pages when percpu
-	 * is vmalloc based . vmalloc doesn't guarantee 2 continuous vmalloc
-	 * pages are also on 2 continuous physical pages. In this case the
-	 * 2nd part of crash_notes in 2nd page could be lost since only the
-	 * starting address and size of crash_notes are exported through sysfs.
-	 * Here round up the size of crash_notes to the nearest power of two
-	 * and pass it to __alloc_percpu as align value. This can make sure
-	 * crash_notes is allocated inside one physical page.
-	 */
-	size = sizeof(note_buf_t);
-	align = min(roundup_pow_of_two(sizeof(note_buf_t)), PAGE_SIZE);
-
-	/*
-	 * Break compile if size is bigger than PAGE_SIZE since crash_notes
-	 * definitely will be in 2 pages with that.
-	 */
-	BUILD_BUG_ON(size > PAGE_SIZE);
-
-	crash_notes = __alloc_percpu(size, align);
-	if (!crash_notes) {
-		pr_warn("Memory allocation for saving cpu register states failed\n");
-		return -ENOMEM;
-	}
-	return 0;
-}
-subsys_initcall(crash_notes_memory_init);
-
-
-/*
- * parsing the "crashkernel" commandline
- *
- * this code is intended to be called from architecture specific code
- */
-
-
-/*
- * This function parses command lines in the format
- *
- *   crashkernel=ramsize-range:size[,...][@offset]
- *
- * The function returns 0 on success and -EINVAL on failure.
- */
-static int __init parse_crashkernel_mem(char *cmdline,
-					unsigned long long system_ram,
-					unsigned long long *crash_size,
-					unsigned long long *crash_base)
-{
-	char *cur = cmdline, *tmp;
-
-	/* for each entry of the comma-separated list */
-	do {
-		unsigned long long start, end = ULLONG_MAX, size;
-
-		/* get the start of the range */
-		start = memparse(cur, &tmp);
-		if (cur == tmp) {
-			pr_warn("crashkernel: Memory value expected\n");
-			return -EINVAL;
-		}
-		cur = tmp;
-		if (*cur != '-') {
-			pr_warn("crashkernel: '-' expected\n");
-			return -EINVAL;
-		}
-		cur++;
-
-		/* if no ':' is here, than we read the end */
-		if (*cur != ':') {
-			end = memparse(cur, &tmp);
-			if (cur == tmp) {
-				pr_warn("crashkernel: Memory value expected\n");
-				return -EINVAL;
-			}
-			cur = tmp;
-			if (end <= start) {
-				pr_warn("crashkernel: end <= start\n");
-				return -EINVAL;
-			}
-		}
-
-		if (*cur != ':') {
-			pr_warn("crashkernel: ':' expected\n");
-			return -EINVAL;
-		}
-		cur++;
-
-		size = memparse(cur, &tmp);
-		if (cur == tmp) {
-			pr_warn("Memory value expected\n");
-			return -EINVAL;
-		}
-		cur = tmp;
-		if (size >= system_ram) {
-			pr_warn("crashkernel: invalid size\n");
-			return -EINVAL;
-		}
-
-		/* match ? */
-		if (system_ram >= start && system_ram < end) {
-			*crash_size = size;
-			break;
-		}
-	} while (*cur++ == ',');
-
-	if (*crash_size > 0) {
-		while (*cur && *cur != ' ' && *cur != '@')
-			cur++;
-		if (*cur == '@') {
-			cur++;
-			*crash_base = memparse(cur, &tmp);
-			if (cur == tmp) {
-				pr_warn("Memory value expected after '@'\n");
-				return -EINVAL;
+	i = 0;
+	for_each_kimage_entry(image, ptr, entry) {
+		if (entry & IND_DESTINATION) {
+			dest_page_addr = entry & PAGE_MASK;
+		} else if (entry & IND_SOURCE) {
+			if (dest_page_addr >= addr && dest_page_addr < eaddr) {
+				src_page_addr = entry & PAGE_MASK;
+				src_pages[i++] =
+					virt_to_page(__va(src_page_addr));
+				if (i == npages)
+					break;
+				dest_page_addr += PAGE_SIZE;
 			}
 		}
 	}
 
-	return 0;
+	/* Sanity check. */
+	WARN_ON(i < npages);
+
+	vaddr = vmap(src_pages, npages, VM_MAP, PAGE_KERNEL);
+	kfree(src_pages);
+
+	if (!vaddr)
+		pr_err("Could not map ima buffer.\n");
+
+	return vaddr;
 }
 
-/*
- * That function parses "simple" (old) crashkernel command lines like
- *
- *	crashkernel=size[@offset]
- *
- * It returns 0 on success and -EINVAL on failure.
- */
-static int __init parse_crashkernel_simple(char *cmdline,
-					   unsigned long long *crash_size,
-					   unsigned long long *crash_base)
+void kimage_unmap_segment(void *segment_buffer)
 {
-	char *cur = cmdline;
-
-	*crash_size = memparse(cmdline, &cur);
-	if (cmdline == cur) {
-		pr_warn("crashkernel: memory value expected\n");
-		return -EINVAL;
-	}
-
-	if (*cur == '@')
-		*crash_base = memparse(cur+1, &cur);
-	else if (*cur != ' ' && *cur != '\0') {
-		pr_warn("crashkernel: unrecognized char: %c\n", *cur);
-		return -EINVAL;
-	}
-
-	return 0;
+	if (is_vmalloc_addr(segment_buffer))
+		vunmap(segment_buffer);
 }
 
-#define SUFFIX_HIGH 0
-#define SUFFIX_LOW  1
-#define SUFFIX_NULL 2
-static __initdata char *suffix_tbl[] = {
-	[SUFFIX_HIGH] = ",high",
-	[SUFFIX_LOW]  = ",low",
-	[SUFFIX_NULL] = NULL,
+struct kexec_load_limit {
+	/* Mutex protects the limit count. */
+	struct mutex mutex;
+	int limit;
 };
 
-/*
- * That function parses "suffix"  crashkernel command lines like
- *
- *	crashkernel=size,[high|low]
- *
- * It returns 0 on success and -EINVAL on failure.
- */
-static int __init parse_crashkernel_suffix(char *cmdline,
-					   unsigned long long	*crash_size,
-					   const char *suffix)
+static struct kexec_load_limit load_limit_reboot = {
+	.mutex = __MUTEX_INITIALIZER(load_limit_reboot.mutex),
+	.limit = -1,
+};
+
+static struct kexec_load_limit load_limit_panic = {
+	.mutex = __MUTEX_INITIALIZER(load_limit_panic.mutex),
+	.limit = -1,
+};
+
+struct kimage *kexec_image;
+struct kimage *kexec_crash_image;
+static int kexec_load_disabled;
+
+#ifdef CONFIG_SYSCTL
+static int kexec_limit_handler(const struct ctl_table *table, int write,
+			       void *buffer, size_t *lenp, loff_t *ppos)
 {
-	char *cur = cmdline;
+	struct kexec_load_limit *limit = table->data;
+	int val;
+	struct ctl_table tmp = {
+		.data = &val,
+		.maxlen = sizeof(val),
+		.mode = table->mode,
+	};
+	int ret;
 
-	*crash_size = memparse(cmdline, &cur);
-	if (cmdline == cur) {
-		pr_warn("crashkernel: memory value expected\n");
-		return -EINVAL;
+	if (write) {
+		ret = proc_dointvec(&tmp, write, buffer, lenp, ppos);
+		if (ret)
+			return ret;
+
+		if (val < 0)
+			return -EINVAL;
+
+		mutex_lock(&limit->mutex);
+		if (limit->limit != -1 && val >= limit->limit)
+			ret = -EINVAL;
+		else
+			limit->limit = val;
+		mutex_unlock(&limit->mutex);
+
+		return ret;
 	}
 
-	/* check with suffix */
-	if (strncmp(cur, suffix, strlen(suffix))) {
-		pr_warn("crashkernel: unrecognized char: %c\n", *cur);
-		return -EINVAL;
-	}
-	cur += strlen(suffix);
-	if (*cur != ' ' && *cur != '\0') {
-		pr_warn("crashkernel: unrecognized char: %c\n", *cur);
-		return -EINVAL;
-	}
+	mutex_lock(&limit->mutex);
+	val = limit->limit;
+	mutex_unlock(&limit->mutex);
 
+	return proc_dointvec(&tmp, write, buffer, lenp, ppos);
+}
+
+static const struct ctl_table kexec_core_sysctls[] = {
+	{
+		.procname	= "kexec_load_disabled",
+		.data		= &kexec_load_disabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		/* only handle a transition from default "0" to "1" */
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "kexec_load_limit_panic",
+		.data		= &load_limit_panic,
+		.mode		= 0644,
+		.proc_handler	= kexec_limit_handler,
+	},
+	{
+		.procname	= "kexec_load_limit_reboot",
+		.data		= &load_limit_reboot,
+		.mode		= 0644,
+		.proc_handler	= kexec_limit_handler,
+	},
+};
+
+static int __init kexec_core_sysctl_init(void)
+{
+	register_sysctl_init("kernel", kexec_core_sysctls);
 	return 0;
 }
+late_initcall(kexec_core_sysctl_init);
+#endif
 
-static __init char *get_last_crashkernel(char *cmdline,
-			     const char *name,
-			     const char *suffix)
+bool kexec_load_permitted(int kexec_image_type)
 {
-	char *p = cmdline, *ck_cmdline = NULL;
+	struct kexec_load_limit *limit;
 
-	/* find crashkernel and use the last one if there are more */
-	p = strstr(p, name);
-	while (p) {
-		char *end_p = strchr(p, ' ');
-		char *q;
-
-		if (!end_p)
-			end_p = p + strlen(p);
-
-		if (!suffix) {
-			int i;
-
-			/* skip the one with any known suffix */
-			for (i = 0; suffix_tbl[i]; i++) {
-				q = end_p - strlen(suffix_tbl[i]);
-				if (!strncmp(q, suffix_tbl[i],
-					     strlen(suffix_tbl[i])))
-					goto next;
-			}
-			ck_cmdline = p;
-		} else {
-			q = end_p - strlen(suffix);
-			if (!strncmp(q, suffix, strlen(suffix)))
-				ck_cmdline = p;
-		}
-next:
-		p = strstr(p+1, name);
-	}
-
-	if (!ck_cmdline)
-		return NULL;
-
-	return ck_cmdline;
-}
-
-static int __init __parse_crashkernel(char *cmdline,
-			     unsigned long long system_ram,
-			     unsigned long long *crash_size,
-			     unsigned long long *crash_base,
-			     const char *name,
-			     const char *suffix)
-{
-	char	*first_colon, *first_space;
-	char	*ck_cmdline;
-
-	BUG_ON(!crash_size || !crash_base);
-	*crash_size = 0;
-	*crash_base = 0;
-
-	ck_cmdline = get_last_crashkernel(cmdline, name, suffix);
-
-	if (!ck_cmdline)
-		return -EINVAL;
-
-	ck_cmdline += strlen(name);
-
-	if (suffix)
-		return parse_crashkernel_suffix(ck_cmdline, crash_size,
-				suffix);
 	/*
-	 * if the commandline contains a ':', then that's the extended
-	 * syntax -- if not, it must be the classic syntax
+	 * Only the superuser can use the kexec syscall and if it has not
+	 * been disabled.
 	 */
-	first_colon = strchr(ck_cmdline, ':');
-	first_space = strchr(ck_cmdline, ' ');
-	if (first_colon && (!first_space || first_colon < first_space))
-		return parse_crashkernel_mem(ck_cmdline, system_ram,
-				crash_size, crash_base);
+	if (!capable(CAP_SYS_BOOT) || kexec_load_disabled)
+		return false;
 
-	return parse_crashkernel_simple(ck_cmdline, crash_size, crash_base);
+	/* Check limit counter and decrease it.*/
+	limit = (kexec_image_type == KEXEC_TYPE_CRASH) ?
+		&load_limit_panic : &load_limit_reboot;
+	mutex_lock(&limit->mutex);
+	if (!limit->limit) {
+		mutex_unlock(&limit->mutex);
+		return false;
+	}
+	if (limit->limit != -1)
+		limit->limit--;
+	mutex_unlock(&limit->mutex);
+
+	return true;
 }
-
-/*
- * That function is the entry point for command line parsing and should be
- * called from the arch-specific code.
- */
-int __init parse_crashkernel(char *cmdline,
-			     unsigned long long system_ram,
-			     unsigned long long *crash_size,
-			     unsigned long long *crash_base)
-{
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base,
-					"crashkernel=", NULL);
-}
-
-int __init parse_crashkernel_high(char *cmdline,
-			     unsigned long long system_ram,
-			     unsigned long long *crash_size,
-			     unsigned long long *crash_base)
-{
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base,
-				"crashkernel=", suffix_tbl[SUFFIX_HIGH]);
-}
-
-int __init parse_crashkernel_low(char *cmdline,
-			     unsigned long long system_ram,
-			     unsigned long long *crash_size,
-			     unsigned long long *crash_base)
-{
-	return __parse_crashkernel(cmdline, system_ram, crash_size, crash_base,
-				"crashkernel=", suffix_tbl[SUFFIX_LOW]);
-}
-
-static void update_vmcoreinfo_note(void)
-{
-	u32 *buf = vmcoreinfo_note;
-
-	if (!vmcoreinfo_size)
-		return;
-	buf = append_elf_note(buf, VMCOREINFO_NOTE_NAME, 0, vmcoreinfo_data,
-			      vmcoreinfo_size);
-	final_note(buf);
-}
-
-void crash_save_vmcoreinfo(void)
-{
-	vmcoreinfo_append_str("CRASHTIME=%ld\n", get_seconds());
-	update_vmcoreinfo_note();
-}
-
-void vmcoreinfo_append_str(const char *fmt, ...)
-{
-	va_list args;
-	char buf[0x50];
-	size_t r;
-
-	va_start(args, fmt);
-	r = vscnprintf(buf, sizeof(buf), fmt, args);
-	va_end(args);
-
-	r = min(r, vmcoreinfo_max_size - vmcoreinfo_size);
-
-	memcpy(&vmcoreinfo_data[vmcoreinfo_size], buf, r);
-
-	vmcoreinfo_size += r;
-}
-
-/*
- * provide an empty default implementation here -- architecture
- * code may override this
- */
-void __weak arch_crash_save_vmcoreinfo(void)
-{}
-
-phys_addr_t __weak paddr_vmcoreinfo_note(void)
-{
-	return __pa((unsigned long)(char *)&vmcoreinfo_note);
-}
-
-static int __init crash_save_vmcoreinfo_init(void)
-{
-	VMCOREINFO_OSRELEASE(init_uts_ns.name.release);
-	VMCOREINFO_PAGESIZE(PAGE_SIZE);
-
-	VMCOREINFO_SYMBOL(init_uts_ns);
-	VMCOREINFO_SYMBOL(node_online_map);
-#ifdef CONFIG_MMU
-	VMCOREINFO_SYMBOL(swapper_pg_dir);
-#endif
-	VMCOREINFO_SYMBOL(_stext);
-	VMCOREINFO_SYMBOL(vmap_area_list);
-
-#ifndef CONFIG_NEED_MULTIPLE_NODES
-	VMCOREINFO_SYMBOL(mem_map);
-	VMCOREINFO_SYMBOL(contig_page_data);
-#endif
-#ifdef CONFIG_SPARSEMEM
-	VMCOREINFO_SYMBOL(mem_section);
-	VMCOREINFO_LENGTH(mem_section, NR_SECTION_ROOTS);
-	VMCOREINFO_STRUCT_SIZE(mem_section);
-	VMCOREINFO_OFFSET(mem_section, section_mem_map);
-#endif
-	VMCOREINFO_STRUCT_SIZE(page);
-	VMCOREINFO_STRUCT_SIZE(pglist_data);
-	VMCOREINFO_STRUCT_SIZE(zone);
-	VMCOREINFO_STRUCT_SIZE(free_area);
-	VMCOREINFO_STRUCT_SIZE(list_head);
-	VMCOREINFO_SIZE(nodemask_t);
-	VMCOREINFO_OFFSET(page, flags);
-	VMCOREINFO_OFFSET(page, _refcount);
-	VMCOREINFO_OFFSET(page, mapping);
-	VMCOREINFO_OFFSET(page, lru);
-	VMCOREINFO_OFFSET(page, _mapcount);
-	VMCOREINFO_OFFSET(page, private);
-	VMCOREINFO_OFFSET(page, compound_dtor);
-	VMCOREINFO_OFFSET(page, compound_order);
-	VMCOREINFO_OFFSET(page, compound_head);
-	VMCOREINFO_OFFSET(pglist_data, node_zones);
-	VMCOREINFO_OFFSET(pglist_data, nr_zones);
-#ifdef CONFIG_FLAT_NODE_MEM_MAP
-	VMCOREINFO_OFFSET(pglist_data, node_mem_map);
-#endif
-	VMCOREINFO_OFFSET(pglist_data, node_start_pfn);
-	VMCOREINFO_OFFSET(pglist_data, node_spanned_pages);
-	VMCOREINFO_OFFSET(pglist_data, node_id);
-	VMCOREINFO_OFFSET(zone, free_area);
-	VMCOREINFO_OFFSET(zone, vm_stat);
-	VMCOREINFO_OFFSET(zone, spanned_pages);
-	VMCOREINFO_OFFSET(free_area, free_list);
-	VMCOREINFO_OFFSET(list_head, next);
-	VMCOREINFO_OFFSET(list_head, prev);
-	VMCOREINFO_OFFSET(vmap_area, va_start);
-	VMCOREINFO_OFFSET(vmap_area, list);
-	VMCOREINFO_LENGTH(zone.free_area, MAX_ORDER);
-	log_buf_kexec_setup();
-	VMCOREINFO_LENGTH(free_area.free_list, MIGRATE_TYPES);
-	VMCOREINFO_NUMBER(NR_FREE_PAGES);
-	VMCOREINFO_NUMBER(PG_lru);
-	VMCOREINFO_NUMBER(PG_private);
-	VMCOREINFO_NUMBER(PG_swapcache);
-	VMCOREINFO_NUMBER(PG_slab);
-#ifdef CONFIG_MEMORY_FAILURE
-	VMCOREINFO_NUMBER(PG_hwpoison);
-#endif
-	VMCOREINFO_NUMBER(PG_head_mask);
-	VMCOREINFO_NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE);
-#ifdef CONFIG_X86
-	VMCOREINFO_NUMBER(KERNEL_IMAGE_SIZE);
-#endif
-#ifdef CONFIG_HUGETLB_PAGE
-	VMCOREINFO_NUMBER(HUGETLB_PAGE_DTOR);
-#endif
-
-	arch_crash_save_vmcoreinfo();
-	update_vmcoreinfo_note();
-
-	return 0;
-}
-
-subsys_initcall(crash_save_vmcoreinfo_init);
 
 /*
  * Move into place and start executing a preloaded standalone
@@ -1490,37 +1156,46 @@ int kernel_kexec(void)
 {
 	int error = 0;
 
-	if (!mutex_trylock(&kexec_mutex))
+	if (!kexec_trylock())
 		return -EBUSY;
 	if (!kexec_image) {
 		error = -EINVAL;
 		goto Unlock;
 	}
 
+	if (!kexec_image->preserve_context) {
+		error = liveupdate_reboot();
+		if (error)
+			goto Unlock;
+	}
+
 #ifdef CONFIG_KEXEC_JUMP
 	if (kexec_image->preserve_context) {
-		lock_system_sleep();
+		/*
+		 * This flow is analogous to hibernation flows that occur
+		 * before creating an image and before jumping from the
+		 * restore kernel to the image one, so it uses the same
+		 * device callbacks as those two flows.
+		 */
 		pm_prepare_console();
 		error = freeze_processes();
 		if (error) {
 			error = -EBUSY;
 			goto Restore_console;
 		}
-		suspend_console();
+		console_suspend_all();
 		error = dpm_suspend_start(PMSG_FREEZE);
 		if (error)
-			goto Resume_console;
-		/* At this point, dpm_suspend_start() has been called,
-		 * but *not* dpm_suspend_end(). We *must* call
-		 * dpm_suspend_end() now.  Otherwise, drivers for
-		 * some devices (e.g. interrupt controllers) become
-		 * desynchronized with the actual state of the
-		 * hardware at resume time, and evil weirdness ensues.
+			goto Resume_devices;
+		/*
+		 * dpm_suspend_end() must be called after dpm_suspend_start()
+		 * to complete the transition, like in the hibernation flows
+		 * mentioned above.
 		 */
 		error = dpm_suspend_end(PMSG_FREEZE);
 		if (error)
 			goto Resume_devices;
-		error = disable_nonboot_cpus();
+		error = suspend_disable_secondary_cpus();
 		if (error)
 			goto Enable_cpus;
 		local_irq_disable();
@@ -1531,8 +1206,9 @@ int kernel_kexec(void)
 #endif
 	{
 		kexec_in_progress = true;
-		kernel_restart_prepare(NULL);
+		kernel_restart_prepare("kexec reboot");
 		migrate_to_reboot_cpu();
+		syscore_shutdown();
 
 		/*
 		 * migrate_to_reboot_cpu() disables CPU hotplug assuming that
@@ -1541,45 +1217,178 @@ int kernel_kexec(void)
 		 * CPU hotplug again; so re-enable it here.
 		 */
 		cpu_hotplug_enable();
-		pr_emerg("Starting new kernel\n");
+		pr_notice("Starting new kernel\n");
 		machine_shutdown();
 	}
 
+	kmsg_dump(KMSG_DUMP_SHUTDOWN);
 	machine_kexec(kexec_image);
 
 #ifdef CONFIG_KEXEC_JUMP
 	if (kexec_image->preserve_context) {
+		/*
+		 * This flow is analogous to hibernation flows that occur after
+		 * creating an image and after the image kernel has got control
+		 * back, and in case the devices have been reset or otherwise
+		 * manipulated in the meantime, it uses the device callbacks
+		 * used by the latter.
+		 */
 		syscore_resume();
  Enable_irqs:
 		local_irq_enable();
  Enable_cpus:
-		enable_nonboot_cpus();
+		suspend_enable_secondary_cpus();
 		dpm_resume_start(PMSG_RESTORE);
  Resume_devices:
 		dpm_resume_end(PMSG_RESTORE);
- Resume_console:
-		resume_console();
+		console_resume_all();
 		thaw_processes();
  Restore_console:
 		pm_restore_console();
-		unlock_system_sleep();
 	}
 #endif
 
  Unlock:
-	mutex_unlock(&kexec_mutex);
+	kexec_unlock();
 	return error;
 }
 
-/*
- * Protection mechanism for crashkernel reserved memory after
- * the kdump kernel is loaded.
- *
- * Provide an empty default implementation here -- architecture
- * code may override this
- */
-void __weak arch_kexec_protect_crashkres(void)
-{}
+static ssize_t loaded_show(struct kobject *kobj,
+				 struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", !!kexec_image);
+}
+static struct kobj_attribute loaded_attr = __ATTR_RO(loaded);
 
-void __weak arch_kexec_unprotect_crashkres(void)
-{}
+#ifdef CONFIG_CRASH_DUMP
+static ssize_t crash_loaded_show(struct kobject *kobj,
+				       struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", kexec_crash_loaded());
+}
+static struct kobj_attribute crash_loaded_attr = __ATTR_RO(crash_loaded);
+
+#ifdef CONFIG_CRASH_RESERVE
+static ssize_t crash_cma_ranges_show(struct kobject *kobj,
+				     struct kobj_attribute *attr, char *buf)
+{
+
+	ssize_t len = 0;
+	int i;
+
+	for (i = 0; i < crashk_cma_cnt; ++i) {
+		len += sysfs_emit_at(buf, len, "%08llx-%08llx\n",
+				     crashk_cma_ranges[i].start,
+				     crashk_cma_ranges[i].end);
+	}
+	return len;
+}
+static struct kobj_attribute crash_cma_ranges_attr = __ATTR_RO(crash_cma_ranges);
+#endif
+
+static ssize_t crash_size_show(struct kobject *kobj,
+				       struct kobj_attribute *attr, char *buf)
+{
+	ssize_t size = crash_get_memory_size();
+
+	if (size < 0)
+		return size;
+
+	return sysfs_emit(buf, "%zd\n", size);
+}
+static ssize_t crash_size_store(struct kobject *kobj,
+				struct kobj_attribute *attr,
+				const char *buf, size_t count)
+{
+	unsigned long cnt;
+	int ret;
+
+	if (kstrtoul(buf, 0, &cnt))
+		return -EINVAL;
+
+	ret = crash_shrink_memory(cnt);
+	return ret < 0 ? ret : count;
+}
+static struct kobj_attribute crash_size_attr = __ATTR_RW(crash_size);
+
+#ifdef CONFIG_CRASH_HOTPLUG
+static ssize_t crash_elfcorehdr_size_show(struct kobject *kobj,
+			       struct kobj_attribute *attr, char *buf)
+{
+	unsigned int sz = crash_get_elfcorehdr_size();
+
+	return sysfs_emit(buf, "%u\n", sz);
+}
+static struct kobj_attribute crash_elfcorehdr_size_attr = __ATTR_RO(crash_elfcorehdr_size);
+
+#endif /* CONFIG_CRASH_HOTPLUG */
+#endif /* CONFIG_CRASH_DUMP */
+
+static struct attribute *kexec_attrs[] = {
+	&loaded_attr.attr,
+#ifdef CONFIG_CRASH_DUMP
+	&crash_loaded_attr.attr,
+	&crash_size_attr.attr,
+#ifdef CONFIG_CRASH_RESERVE
+	&crash_cma_ranges_attr.attr,
+#endif
+#ifdef CONFIG_CRASH_HOTPLUG
+	&crash_elfcorehdr_size_attr.attr,
+#endif
+#endif
+	NULL
+};
+
+struct kexec_link_entry {
+	const char *target;
+	const char *name;
+};
+
+static struct kexec_link_entry kexec_links[] = {
+	{ "loaded", "kexec_loaded" },
+#ifdef CONFIG_CRASH_DUMP
+	{ "crash_loaded", "kexec_crash_loaded" },
+	{ "crash_size", "kexec_crash_size" },
+#ifdef CONFIG_CRASH_RESERVE
+	{"crash_cma_ranges", "kexec_crash_cma_ranges"},
+#endif
+#ifdef CONFIG_CRASH_HOTPLUG
+	{ "crash_elfcorehdr_size", "crash_elfcorehdr_size" },
+#endif
+#endif
+};
+
+static struct kobject *kexec_kobj;
+ATTRIBUTE_GROUPS(kexec);
+
+static int __init init_kexec_sysctl(void)
+{
+	int error;
+	int i;
+
+	kexec_kobj = kobject_create_and_add("kexec", kernel_kobj);
+	if (!kexec_kobj) {
+		pr_err("failed to create kexec kobject\n");
+		return -ENOMEM;
+	}
+
+	error = sysfs_create_groups(kexec_kobj, kexec_groups);
+	if (error)
+		goto kset_exit;
+
+	for (i = 0; i < ARRAY_SIZE(kexec_links); i++) {
+		error = compat_only_sysfs_link_entry_to_kobj(kernel_kobj, kexec_kobj,
+							     kexec_links[i].target,
+							     kexec_links[i].name);
+		if (error)
+			pr_err("Unable to create %s symlink (%d)", kexec_links[i].name, error);
+	}
+
+	return 0;
+
+kset_exit:
+	kobject_put(kexec_kobj);
+	return error;
+}
+
+subsys_initcall(init_kexec_sysctl);

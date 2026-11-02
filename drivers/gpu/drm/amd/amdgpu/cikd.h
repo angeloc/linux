@@ -43,10 +43,22 @@
 #define CRTC4_REGISTER_OFFSET                 (0x477c - 0x1b7c)
 #define CRTC5_REGISTER_OFFSET                 (0x4a7c - 0x1b7c)
 
-#define BONAIRE_GB_ADDR_CONFIG_GOLDEN        0x12010001
-#define HAWAII_GB_ADDR_CONFIG_GOLDEN         0x12011003
+/* hpd instance offsets */
+#define HPD0_REGISTER_OFFSET                 (0x1807 - 0x1807)
+#define HPD1_REGISTER_OFFSET                 (0x180a - 0x1807)
+#define HPD2_REGISTER_OFFSET                 (0x180d - 0x1807)
+#define HPD3_REGISTER_OFFSET                 (0x1810 - 0x1807)
+#define HPD4_REGISTER_OFFSET                 (0x1813 - 0x1807)
+#define HPD5_REGISTER_OFFSET                 (0x1816 - 0x1807)
 
-#define AMDGPU_NUM_OF_VMIDS	8
+/* audio endpt instance offsets */
+#define AUD0_REGISTER_OFFSET                 (0x1780 - 0x1780)
+#define AUD1_REGISTER_OFFSET                 (0x1786 - 0x1780)
+#define AUD2_REGISTER_OFFSET                 (0x178c - 0x1780)
+#define AUD3_REGISTER_OFFSET                 (0x1792 - 0x1780)
+#define AUD4_REGISTER_OFFSET                 (0x1798 - 0x1780)
+#define AUD5_REGISTER_OFFSET                 (0x179d - 0x1780)
+#define AUD6_REGISTER_OFFSET                 (0x17a4 - 0x1780)
 
 #define		PIPEID(x)					((x) << 0)
 #define		MEID(x)						((x) << 2)
@@ -358,6 +370,7 @@
 		 * 1 - Stream
 		 * 2 - Bypass
 		 */
+#define		EOP_EXEC				(1 << 28) /* For Trailing Fence */
 #define		DATA_SEL(x)                             ((x) << 29)
 		/* 0 - discard
 		 * 1 - send low 32bit data
@@ -442,7 +455,7 @@
 #              define PACKET3_DMA_DATA_CMD_SAIC    (1 << 28)
 #              define PACKET3_DMA_DATA_CMD_DAIC    (1 << 29)
 #              define PACKET3_DMA_DATA_CMD_RAW_WAIT  (1 << 30)
-#define	PACKET3_AQUIRE_MEM				0x58
+#define	PACKET3_ACQUIRE_MEM				0x58
 #define	PACKET3_REWIND					0x59
 #define	PACKET3_LOAD_UCONFIG_REG			0x5E
 #define	PACKET3_LOAD_SH_REG				0x5F
@@ -494,7 +507,7 @@
 #       define SDMA_COPY_SUB_OPCODE_T2T_SUB_WINDOW        6
 #define	SDMA_OPCODE_WRITE				  2
 #       define SDMA_WRITE_SUB_OPCODE_LINEAR               0
-#       define SDMA_WRTIE_SUB_OPCODE_TILED                1
+#       define SDMA_WRITE_SUB_OPCODE_TILED                1
 #define	SDMA_OPCODE_INDIRECT_BUFFER			  4
 #define	SDMA_OPCODE_FENCE				  5
 #define	SDMA_OPCODE_TRAP				  6
@@ -554,12 +567,48 @@
 #define	PRIVATE_BASE(x)	((x) << 0) /* scratch */
 #define	SHARED_BASE(x)	((x) << 16) /* LDS */
 
-#define KFD_CIK_SDMA_QUEUE_OFFSET	0x200
+#define KFD_CIK_SDMA_QUEUE_OFFSET (mmSDMA0_RLC1_RB_CNTL - mmSDMA0_RLC0_RB_CNTL)
 
 /* valid for both DEFAULT_MTYPE and APE1_MTYPE */
 enum {
 	MTYPE_CACHED = 0,
 	MTYPE_NONCACHED = 3
 };
+
+/* mmPA_SC_RASTER_CONFIG mask */
+#define RB_MAP_PKR0(x)				((x) << 0)
+#define RB_MAP_PKR0_MASK			(0x3 << 0)
+#define RB_MAP_PKR1(x)				((x) << 2)
+#define RB_MAP_PKR1_MASK			(0x3 << 2)
+#define RB_XSEL2(x)				((x) << 4)
+#define RB_XSEL2_MASK				(0x3 << 4)
+#define RB_XSEL					(1 << 6)
+#define RB_YSEL					(1 << 7)
+#define PKR_MAP(x)				((x) << 8)
+#define PKR_MAP_MASK				(0x3 << 8)
+#define PKR_XSEL(x)				((x) << 10)
+#define PKR_XSEL_MASK				(0x3 << 10)
+#define PKR_YSEL(x)				((x) << 12)
+#define PKR_YSEL_MASK				(0x3 << 12)
+#define SC_MAP(x)				((x) << 16)
+#define SC_MAP_MASK				(0x3 << 16)
+#define SC_XSEL(x)				((x) << 18)
+#define SC_XSEL_MASK				(0x3 << 18)
+#define SC_YSEL(x)				((x) << 20)
+#define SC_YSEL_MASK				(0x3 << 20)
+#define SE_MAP(x)				((x) << 24)
+#define SE_MAP_MASK				(0x3 << 24)
+#define SE_XSEL(x)				((x) << 26)
+#define SE_XSEL_MASK				(0x3 << 26)
+#define SE_YSEL(x)				((x) << 28)
+#define SE_YSEL_MASK				(0x3 << 28)
+
+/* mmPA_SC_RASTER_CONFIG_1 mask */
+#define SE_PAIR_MAP(x)				((x) << 0)
+#define SE_PAIR_MAP_MASK			(0x3 << 0)
+#define SE_PAIR_XSEL(x)				((x) << 2)
+#define SE_PAIR_XSEL_MASK			(0x3 << 2)
+#define SE_PAIR_YSEL(x)				((x) << 4)
+#define SE_PAIR_YSEL_MASK			(0x3 << 4)
 
 #endif

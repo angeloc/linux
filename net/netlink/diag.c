@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/module.h>
 
 #include <net/sock.h>
@@ -11,17 +12,50 @@
 static int sk_diag_dump_groups(struct sock *sk, struct sk_buff *nlskb)
 {
 	struct netlink_sock *nlk = nlk_sk(sk);
+	unsigned long *groups;
+	unsigned int ngroups;
 
-	if (nlk->groups == NULL)
+	/* Hashed sockets are dumped from the rhashtable walk, which only
+	 * holds rcu_read_lock(), while netlink_realloc_groups() can replace
+	 * nlk->groups and nlk->ngroups at any time.
+	 *
+	 * Read nlk->ngroups first : this pairs with smp_store_release()
+	 * from netlink_realloc_groups(), so that we can not use the new
+	 * (bigger) size with the old (smaller) buffer. The old buffer is
+	 * freed after an RCU grace period.
+	 */
+	ngroups = smp_load_acquire(&nlk->ngroups);
+	groups = READ_ONCE(nlk->groups);
+	if (!groups)
 		return 0;
 
-	return nla_put(nlskb, NETLINK_DIAG_GROUPS, NLGRPSZ(nlk->ngroups),
-		       nlk->groups);
+	return nla_put(nlskb, NETLINK_DIAG_GROUPS, NLGRPSZ(ngroups), groups);
+}
+
+static int sk_diag_put_flags(struct sock *sk, struct sk_buff *skb)
+{
+	struct netlink_sock *nlk = nlk_sk(sk);
+	u32 flags = 0;
+
+	if (nlk->cb_running)
+		flags |= NDIAG_FLAG_CB_RUNNING;
+	if (nlk_test_bit(RECV_PKTINFO, sk))
+		flags |= NDIAG_FLAG_PKTINFO;
+	if (nlk_test_bit(BROADCAST_SEND_ERROR, sk))
+		flags |= NDIAG_FLAG_BROADCAST_ERROR;
+	if (nlk_test_bit(RECV_NO_ENOBUFS, sk))
+		flags |= NDIAG_FLAG_NO_ENOBUFS;
+	if (nlk_test_bit(LISTEN_ALL_NSID, sk))
+		flags |= NDIAG_FLAG_LISTEN_ALL_NSID;
+	if (nlk_test_bit(CAP_ACK, sk))
+		flags |= NDIAG_FLAG_CAP_ACK;
+
+	return nla_put_u32(skb, NETLINK_DIAG_FLAGS, flags);
 }
 
 static int sk_diag_fill(struct sock *sk, struct sk_buff *skb,
 			struct netlink_diag_req *req,
-			u32 portid, u32 seq, u32 flags, int sk_ino)
+			u32 portid, u32 seq, u32 flags, u64 sk_ino)
 {
 	struct nlmsghdr *nlh;
 	struct netlink_diag_msg *rep;
@@ -52,6 +86,10 @@ static int sk_diag_fill(struct sock *sk, struct sk_buff *skb,
 	    sock_diag_put_meminfo(sk, skb, NETLINK_DIAG_MEMINFO))
 		goto out_nlmsg_trim;
 
+	if ((req->ndiag_show & NDIAG_SHOW_FLAGS) &&
+	    sk_diag_put_flags(sk, skb))
+		goto out_nlmsg_trim;
+
 	nlmsg_end(skb, nlh);
 	return 0;
 
@@ -63,43 +101,71 @@ out_nlmsg_trim:
 static int __netlink_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
 				int protocol, int s_num)
 {
+	struct rhashtable_iter *hti = (void *)cb->args[2];
 	struct netlink_table *tbl = &nl_table[protocol];
-	struct rhashtable *ht = &tbl->hash;
-	const struct bucket_table *htbl = rht_dereference_rcu(ht->tbl, ht);
 	struct net *net = sock_net(skb->sk);
 	struct netlink_diag_req *req;
 	struct netlink_sock *nlsk;
+	unsigned long flags;
 	struct sock *sk;
-	int ret = 0, num = 0, i;
+	int num = 2;
+	int ret = 0;
 
 	req = nlmsg_data(cb->nlh);
 
-	for (i = 0; i < htbl->size; i++) {
-		struct rhash_head *pos;
+	if (s_num > 1)
+		goto mc_list;
 
-		rht_for_each_entry_rcu(nlsk, pos, htbl, i, node) {
-			sk = (struct sock *)nlsk;
+	num--;
 
-			if (!net_eq(sock_net(sk), net))
-				continue;
-			if (num < s_num) {
-				num++;
+	if (!hti) {
+		hti = kmalloc_obj(*hti);
+		if (!hti)
+			return -ENOMEM;
+
+		cb->args[2] = (long)hti;
+	}
+
+	if (!s_num)
+		rhashtable_walk_enter(&tbl->hash, hti);
+
+	rhashtable_walk_start(hti);
+
+	while ((nlsk = rhashtable_walk_next(hti))) {
+		if (IS_ERR(nlsk)) {
+			ret = PTR_ERR(nlsk);
+			if (ret == -EAGAIN) {
+				ret = 0;
 				continue;
 			}
+			break;
+		}
 
-			if (sk_diag_fill(sk, skb, req,
-					 NETLINK_CB(cb->skb).portid,
-					 cb->nlh->nlmsg_seq,
-					 NLM_F_MULTI,
-					 sock_i_ino(sk)) < 0) {
-				ret = 1;
-				goto done;
-			}
+		sk = (struct sock *)nlsk;
 
-			num++;
+		if (!net_eq(sock_net(sk), net))
+			continue;
+
+		if (sk_diag_fill(sk, skb, req,
+				 NETLINK_CB(cb->skb).portid,
+				 cb->nlh->nlmsg_seq,
+				 NLM_F_MULTI,
+				 sock_i_ino(sk)) < 0) {
+			ret = 1;
+			break;
 		}
 	}
 
+	rhashtable_walk_stop(hti);
+
+	if (ret)
+		goto done;
+
+	rhashtable_walk_exit(hti);
+	num++;
+
+mc_list:
+	read_lock_irqsave(&nl_table_lock, flags);
 	sk_for_each_bound(sk, &tbl->mc_list) {
 		if (sk_hashed(sk))
 			continue;
@@ -116,13 +182,14 @@ static int __netlink_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
 				 NLM_F_MULTI,
 				 sock_i_ino(sk)) < 0) {
 			ret = 1;
-			goto done;
+			break;
 		}
 		num++;
 	}
+	read_unlock_irqrestore(&nl_table_lock, flags);
+
 done:
 	cb->args[0] = num;
-	cb->args[1] = protocol;
 
 	return ret;
 }
@@ -131,34 +198,40 @@ static int netlink_diag_dump(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	struct netlink_diag_req *req;
 	int s_num = cb->args[0];
+	int err = 0;
 
 	req = nlmsg_data(cb->nlh);
-
-	rcu_read_lock();
-	read_lock(&nl_table_lock);
 
 	if (req->sdiag_protocol == NDIAG_PROTO_ALL) {
 		int i;
 
 		for (i = cb->args[1]; i < MAX_LINKS; i++) {
-			if (__netlink_diag_dump(skb, cb, i, s_num))
+			err = __netlink_diag_dump(skb, cb, i, s_num);
+			if (err)
 				break;
 			s_num = 0;
 		}
+		cb->args[1] = i;
 	} else {
-		if (req->sdiag_protocol >= MAX_LINKS) {
-			read_unlock(&nl_table_lock);
-			rcu_read_unlock();
+		if (req->sdiag_protocol >= MAX_LINKS)
 			return -ENOENT;
-		}
 
-		__netlink_diag_dump(skb, cb, req->sdiag_protocol, s_num);
+		err = __netlink_diag_dump(skb, cb, req->sdiag_protocol, s_num);
 	}
 
-	read_unlock(&nl_table_lock);
-	rcu_read_unlock();
+	return err <= 0 ? err : skb->len;
+}
 
-	return skb->len;
+static int netlink_diag_dump_done(struct netlink_callback *cb)
+{
+	struct rhashtable_iter *hti = (void *)cb->args[2];
+
+	if (cb->args[0] == 1)
+		rhashtable_walk_exit(hti);
+
+	kfree(hti);
+
+	return 0;
 }
 
 static int netlink_diag_handler_dump(struct sk_buff *skb, struct nlmsghdr *h)
@@ -172,6 +245,7 @@ static int netlink_diag_handler_dump(struct sk_buff *skb, struct nlmsghdr *h)
 	if (h->nlmsg_flags & NLM_F_DUMP) {
 		struct netlink_dump_control c = {
 			.dump = netlink_diag_dump,
+			.done = netlink_diag_dump_done,
 		};
 		return netlink_dump_start(net->diag_nlsk, skb, h, &c);
 	} else
@@ -179,6 +253,7 @@ static int netlink_diag_handler_dump(struct sk_buff *skb, struct nlmsghdr *h)
 }
 
 static const struct sock_diag_handler netlink_diag_handler = {
+	.owner = THIS_MODULE,
 	.family = AF_NETLINK,
 	.dump = netlink_diag_handler_dump,
 };
@@ -195,5 +270,6 @@ static void __exit netlink_diag_exit(void)
 
 module_init(netlink_diag_init);
 module_exit(netlink_diag_exit);
+MODULE_DESCRIPTION("Netlink-based socket monitoring/diagnostic interface (sock_diag)");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_NET_PF_PROTO_TYPE(PF_NETLINK, NETLINK_SOCK_DIAG, 16 /* AF_NETLINK */);

@@ -1,19 +1,17 @@
-dts-dirs	+= brcm
-dts-dirs	+= cavium-octeon
-dts-dirs	+= ingenic
-dts-dirs	+= lantiq
-dts-dirs	+= mti
-dts-dirs	+= netlogic
-dts-dirs	+= pic32
-dts-dirs	+= qca
-dts-dirs	+= ralink
-dts-dirs	+= xilfpga
-
-obj-y		:= $(addsuffix /, $(dts-dirs))
-
-dtstree		:= $(srctree)/$(src)
-dtb-$(CONFIG_OF_ALL_DTBS) := $(patsubst $(dtstree)/%.dts,%.dtb, $(foreach d,$(dts-dirs), $(wildcard $(dtstree)/$(d)/*.dts)))
-
-always		:= $(dtb-y)
-subdir-y	:= $(dts-dirs)
-clean-files	:= *.dtb *.dtb.S
+# SPDX-License-Identifier: GPL-2.0
+subdir-y	+= brcm
+subdir-y	+= cavium-octeon
+subdir-y	+= econet
+subdir-y	+= mobileye
+subdir-y	+= img
+subdir-y	+= ingenic
+subdir-y	+= lantiq
+subdir-y	+= loongson
+subdir-y	+= mscc
+subdir-y	+= mti
+subdir-y	+= ni
+subdir-y	+= pic32
+subdir-y	+= qca
+subdir-y	+= ralink
+subdir-y	+= realtek
+subdir-y	+= xilfpga

@@ -14,7 +14,7 @@
 #include <uapi/asm/bootinfo.h>
 
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #ifdef CONFIG_BOOTINFO_PROC
 extern void save_bootinfo(const struct bi_record *bi);
@@ -22,7 +22,13 @@ extern void save_bootinfo(const struct bi_record *bi);
 static inline void save_bootinfo(const struct bi_record *bi) {}
 #endif
 
-#endif /* __ASSEMBLY__ */
+#ifdef CONFIG_UBOOT
+void process_uboot_commandline(char *commandp, int size);
+#else
+static inline void process_uboot_commandline(char *commandp, int size) {}
+#endif
+
+#endif /* __ASSEMBLER__ */
 
 
 #endif /* _M68K_BOOTINFO_H */

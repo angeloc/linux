@@ -32,36 +32,22 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
-#ifdef KTEST
-#include "../kselftest.h"
-#else
-static inline int ksft_exit_pass(void)
-{
-	exit(0);
-}
-static inline int ksft_exit_fail(void)
-{
-	exit(1);
-}
-#endif
+#include "kselftest.h"
 
-#define NSEC_PER_SEC 1000000000LL
-
-int main(int argv, char **argc)
+int main(int argc, char **argv)
 {
 	struct timex tx;
 	int ret, ppm;
 	pid_t pid;
 
 
-	printf("Running Asyncrhonous Frequency Changing Tests...\n");
+	printf("Running Asynchronous Frequency Changing Tests...\n");
 
 	pid = fork();
 	if (!pid)
-		return system("./inconsistency-check -c 1 -t 600");
+		return system("./inconsistency-check -t 60");
 
 	ppm = 500;
 	ret = 0;
@@ -82,8 +68,8 @@ int main(int argv, char **argc)
 
 	if (ret) {
 		printf("[FAILED]\n");
-		return ksft_exit_fail();
+		ksft_exit_fail();
 	}
 	printf("[OK]\n");
-	return ksft_exit_pass();
+	ksft_exit_pass();
 }

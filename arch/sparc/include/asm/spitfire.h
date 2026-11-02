@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* spitfire.h: SpitFire/BlackBird/Cheetah inline MMU operations.
  *
  * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
@@ -47,11 +48,27 @@
 #define SUN4V_CHIP_NIAGARA5	0x05
 #define SUN4V_CHIP_SPARC_M6	0x06
 #define SUN4V_CHIP_SPARC_M7	0x07
+#define SUN4V_CHIP_SPARC_M8	0x08
 #define SUN4V_CHIP_SPARC64X	0x8a
 #define SUN4V_CHIP_SPARC_SN	0x8b
 #define SUN4V_CHIP_UNKNOWN	0xff
 
-#ifndef __ASSEMBLY__
+/*
+ * The following CPU_ID_xxx constants are used
+ * to identify the CPU type in the setup phase
+ * (see head_64.S)
+ */
+#define CPU_ID_NIAGARA1		('1')
+#define CPU_ID_NIAGARA2		('2')
+#define CPU_ID_NIAGARA3		('3')
+#define CPU_ID_NIAGARA4		('4')
+#define CPU_ID_NIAGARA5		('5')
+#define CPU_ID_M6		('6')
+#define CPU_ID_M7		('7')
+#define CPU_ID_M8		('8')
+#define CPU_ID_SONOMA1		('N')
+
+#ifndef __ASSEMBLER__
 
 enum ultra_tlb_layout {
 	spitfire = 0,
@@ -346,6 +363,6 @@ static inline void cheetah_put_itlb_data(int entry, unsigned long data)
 			       "i" (ASI_ITLB_DATA_ACCESS));
 }
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(__ASSEMBLER__) */
 #endif /* CONFIG_SPARC64 */
 #endif /* !(_SPARC64_SPITFIRE_H) */

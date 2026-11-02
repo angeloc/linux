@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*******************************************************************************
  * This file contains main functions related to iSCSI Parameter negotiation.
  *
@@ -5,25 +6,16 @@
  *
  * Author: Nicholas A. Bellinger <nab@linux-iscsi.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  ******************************************************************************/
 
 #include <linux/slab.h>
-
+#include <linux/uio.h> /* struct kvec */
 #include <target/iscsi/iscsi_target_core.h>
 #include "iscsi_target_util.h"
 #include "iscsi_target_parameters.h"
 
 int iscsi_login_rx_data(
-	struct iscsi_conn *conn,
+	struct iscsit_conn *conn,
 	char *buf,
 	int length)
 {
@@ -45,7 +37,7 @@ int iscsi_login_rx_data(
 }
 
 int iscsi_login_tx_data(
-	struct iscsi_conn *conn,
+	struct iscsit_conn *conn,
 	char *pdu_buf,
 	char *text_buf,
 	int text_length)
@@ -75,61 +67,13 @@ int iscsi_login_tx_data(
 	return 0;
 }
 
-void iscsi_dump_conn_ops(struct iscsi_conn_ops *conn_ops)
-{
-	pr_debug("HeaderDigest: %s\n", (conn_ops->HeaderDigest) ?
-				"CRC32C" : "None");
-	pr_debug("DataDigest: %s\n", (conn_ops->DataDigest) ?
-				"CRC32C" : "None");
-	pr_debug("MaxRecvDataSegmentLength: %u\n",
-				conn_ops->MaxRecvDataSegmentLength);
-}
-
-void iscsi_dump_sess_ops(struct iscsi_sess_ops *sess_ops)
-{
-	pr_debug("InitiatorName: %s\n", sess_ops->InitiatorName);
-	pr_debug("InitiatorAlias: %s\n", sess_ops->InitiatorAlias);
-	pr_debug("TargetName: %s\n", sess_ops->TargetName);
-	pr_debug("TargetAlias: %s\n", sess_ops->TargetAlias);
-	pr_debug("TargetPortalGroupTag: %hu\n",
-			sess_ops->TargetPortalGroupTag);
-	pr_debug("MaxConnections: %hu\n", sess_ops->MaxConnections);
-	pr_debug("InitialR2T: %s\n",
-			(sess_ops->InitialR2T) ? "Yes" : "No");
-	pr_debug("ImmediateData: %s\n", (sess_ops->ImmediateData) ?
-			"Yes" : "No");
-	pr_debug("MaxBurstLength: %u\n", sess_ops->MaxBurstLength);
-	pr_debug("FirstBurstLength: %u\n", sess_ops->FirstBurstLength);
-	pr_debug("DefaultTime2Wait: %hu\n", sess_ops->DefaultTime2Wait);
-	pr_debug("DefaultTime2Retain: %hu\n",
-			sess_ops->DefaultTime2Retain);
-	pr_debug("MaxOutstandingR2T: %hu\n",
-			sess_ops->MaxOutstandingR2T);
-	pr_debug("DataPDUInOrder: %s\n",
-			(sess_ops->DataPDUInOrder) ? "Yes" : "No");
-	pr_debug("DataSequenceInOrder: %s\n",
-			(sess_ops->DataSequenceInOrder) ? "Yes" : "No");
-	pr_debug("ErrorRecoveryLevel: %hu\n",
-			sess_ops->ErrorRecoveryLevel);
-	pr_debug("SessionType: %s\n", (sess_ops->SessionType) ?
-			"Discovery" : "Normal");
-}
-
-void iscsi_print_params(struct iscsi_param_list *param_list)
-{
-	struct iscsi_param *param;
-
-	list_for_each_entry(param, &param_list->param_list, p_list)
-		pr_debug("%s: %s\n", param->name, param->value);
-}
-
 static struct iscsi_param *iscsi_set_default_param(struct iscsi_param_list *param_list,
 		char *name, char *value, u8 phase, u8 scope, u8 sender,
 		u16 type_range, u8 use)
 {
 	struct iscsi_param *param = NULL;
 
-	param = kzalloc(sizeof(struct iscsi_param), GFP_KERNEL);
+	param = kzalloc_obj(struct iscsi_param);
 	if (!param) {
 		pr_err("Unable to allocate memory for parameter.\n");
 		goto out;
@@ -204,7 +148,7 @@ int iscsi_create_default_params(struct iscsi_param_list **param_list_ptr)
 	struct iscsi_param *param = NULL;
 	struct iscsi_param_list *pl;
 
-	pl = kzalloc(sizeof(struct iscsi_param_list), GFP_KERNEL);
+	pl = kzalloc_obj(struct iscsi_param_list);
 	if (!pl) {
 		pr_err("Unable to allocate memory for"
 				" struct iscsi_param_list.\n");
@@ -575,7 +519,7 @@ int iscsi_copy_param_list(
 	struct iscsi_param *new_param = NULL;
 	struct iscsi_param_list *param_list = NULL;
 
-	param_list = kzalloc(sizeof(struct iscsi_param_list), GFP_KERNEL);
+	param_list = kzalloc_obj(struct iscsi_param_list);
 	if (!param_list) {
 		pr_err("Unable to allocate memory for struct iscsi_param_list.\n");
 		return -ENOMEM;
@@ -591,7 +535,7 @@ int iscsi_copy_param_list(
 				continue;
 		}
 
-		new_param = kzalloc(sizeof(struct iscsi_param), GFP_KERNEL);
+		new_param = kzalloc_obj(struct iscsi_param);
 		if (!new_param) {
 			pr_err("Unable to allocate memory for struct iscsi_param.\n");
 			goto err_out;
@@ -726,7 +670,7 @@ static int iscsi_add_notunderstood_response(
 		return -1;
 	}
 
-	extra_response = kzalloc(sizeof(struct iscsi_extra_response), GFP_KERNEL);
+	extra_response = kzalloc_obj(struct iscsi_extra_response);
 	if (!extra_response) {
 		pr_err("Unable to allocate memory for"
 			" struct iscsi_extra_response.\n");
@@ -734,8 +678,8 @@ static int iscsi_add_notunderstood_response(
 	}
 	INIT_LIST_HEAD(&extra_response->er_list);
 
-	strlcpy(extra_response->key, key, sizeof(extra_response->key));
-	strlcpy(extra_response->value, NOTUNDERSTOOD,
+	strscpy(extra_response->key, key, sizeof(extra_response->key));
+	strscpy(extra_response->value, NOTUNDERSTOOD,
 		sizeof(extra_response->value));
 
 	list_add_tail(&extra_response->er_list,
@@ -765,7 +709,8 @@ static int iscsi_check_for_auth_key(char *key)
 	return 0;
 }
 
-static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param)
+static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param,
+						    bool keys_workaround)
 {
 	if (IS_TYPE_BOOL_AND(param)) {
 		if (!strcmp(param->value, NO))
@@ -773,35 +718,31 @@ static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param)
 	} else if (IS_TYPE_BOOL_OR(param)) {
 		if (!strcmp(param->value, YES))
 			SET_PSTATE_REPLY_OPTIONAL(param);
-		 /*
-		  * Required for gPXE iSCSI boot client
-		  */
-		if (!strcmp(param->name, IMMEDIATEDATA))
-			SET_PSTATE_REPLY_OPTIONAL(param);
+
+		if (keys_workaround) {
+			/*
+			 * Required for gPXE iSCSI boot client
+			 */
+			if (!strcmp(param->name, IMMEDIATEDATA))
+				SET_PSTATE_REPLY_OPTIONAL(param);
+		}
 	} else if (IS_TYPE_NUMBER(param)) {
 		if (!strcmp(param->name, MAXRECVDATASEGMENTLENGTH))
 			SET_PSTATE_REPLY_OPTIONAL(param);
-		/*
-		 * The GlobalSAN iSCSI Initiator for MacOSX does
-		 * not respond to MaxBurstLength, FirstBurstLength,
-		 * DefaultTime2Wait or DefaultTime2Retain parameter keys.
-		 * So, we set them to 'reply optional' here, and assume the
-		 * the defaults from iscsi_parameters.h if the initiator
-		 * is not RFC compliant and the keys are not negotiated.
-		 */
-		if (!strcmp(param->name, MAXBURSTLENGTH))
-			SET_PSTATE_REPLY_OPTIONAL(param);
-		if (!strcmp(param->name, FIRSTBURSTLENGTH))
-			SET_PSTATE_REPLY_OPTIONAL(param);
-		if (!strcmp(param->name, DEFAULTTIME2WAIT))
-			SET_PSTATE_REPLY_OPTIONAL(param);
-		if (!strcmp(param->name, DEFAULTTIME2RETAIN))
-			SET_PSTATE_REPLY_OPTIONAL(param);
-		/*
-		 * Required for gPXE iSCSI boot client
-		 */
-		if (!strcmp(param->name, MAXCONNECTIONS))
-			SET_PSTATE_REPLY_OPTIONAL(param);
+
+		if (keys_workaround) {
+			/*
+			 * Required for Mellanox Flexboot PXE boot ROM
+			 */
+			if (!strcmp(param->name, FIRSTBURSTLENGTH))
+				SET_PSTATE_REPLY_OPTIONAL(param);
+
+			/*
+			 * Required for gPXE iSCSI boot client
+			 */
+			if (!strcmp(param->name, MAXCONNECTIONS))
+				SET_PSTATE_REPLY_OPTIONAL(param);
+		}
 	} else if (IS_PHASE_DECLARATIVE(param))
 		SET_PSTATE_REPLY_OPTIONAL(param);
 }
@@ -966,7 +907,7 @@ out:
 }
 
 static int iscsi_check_acceptor_state(struct iscsi_param *param, char *value,
-				struct iscsi_conn *conn)
+				struct iscsit_conn *conn)
 {
 	u8 acceptor_boolean_value = 0, proposer_boolean_value = 0;
 	char *negotiated_value = NULL;
@@ -1273,18 +1214,20 @@ static struct iscsi_param *iscsi_check_key(
 		return param;
 
 	if (!(param->phase & phase)) {
-		pr_err("Key \"%s\" may not be negotiated during ",
-				param->name);
+		char *phase_name;
+
 		switch (phase) {
 		case PHASE_SECURITY:
-			pr_debug("Security phase.\n");
+			phase_name = "Security";
 			break;
 		case PHASE_OPERATIONAL:
-			pr_debug("Operational phase.\n");
+			phase_name = "Operational";
 			break;
 		default:
-			pr_debug("Unknown phase.\n");
+			phase_name = "Unknown";
 		}
+		pr_err("Key \"%s\" may not be negotiated during %s phase.\n",
+				param->name, phase_name);
 		return NULL;
 	}
 
@@ -1363,19 +1306,17 @@ int iscsi_decode_text_input(
 	u8 sender,
 	char *textbuf,
 	u32 length,
-	struct iscsi_conn *conn)
+	struct iscsit_conn *conn)
 {
 	struct iscsi_param_list *param_list = conn->param_list;
 	char *tmpbuf, *start = NULL, *end = NULL;
 
-	tmpbuf = kzalloc(length + 1, GFP_KERNEL);
+	tmpbuf = kmemdup_nul(textbuf, length, GFP_KERNEL);
 	if (!tmpbuf) {
 		pr_err("Unable to allocate %u + 1 bytes for tmpbuf.\n", length);
 		return -ENOMEM;
 	}
 
-	memcpy(tmpbuf, textbuf, length);
-	tmpbuf[length] = '\0';
 	start = tmpbuf;
 	end = (start + length);
 
@@ -1383,10 +1324,8 @@ int iscsi_decode_text_input(
 		char *key, *value;
 		struct iscsi_param *param;
 
-		if (iscsi_extract_key_value(start, &key, &value) < 0) {
-			kfree(tmpbuf);
-			return -1;
-		}
+		if (iscsi_extract_key_value(start, &key, &value) < 0)
+			goto free_buffer;
 
 		pr_debug("Got key: %s=%s\n", key, value);
 
@@ -1399,37 +1338,60 @@ int iscsi_decode_text_input(
 
 		param = iscsi_check_key(key, phase, sender, param_list);
 		if (!param) {
-			if (iscsi_add_notunderstood_response(key,
-					value, param_list) < 0) {
-				kfree(tmpbuf);
-				return -1;
-			}
+			if (iscsi_add_notunderstood_response(key, value,
+							     param_list) < 0)
+				goto free_buffer;
+
 			start += strlen(key) + strlen(value) + 2;
 			continue;
 		}
-		if (iscsi_check_value(param, value) < 0) {
-			kfree(tmpbuf);
-			return -1;
-		}
+		if (iscsi_check_value(param, value) < 0)
+			goto free_buffer;
 
 		start += strlen(key) + strlen(value) + 2;
 
 		if (IS_PSTATE_PROPOSER(param)) {
-			if (iscsi_check_proposer_state(param, value) < 0) {
-				kfree(tmpbuf);
-				return -1;
-			}
+			if (iscsi_check_proposer_state(param, value) < 0)
+				goto free_buffer;
+
 			SET_PSTATE_RESPONSE_GOT(param);
 		} else {
-			if (iscsi_check_acceptor_state(param, value, conn) < 0) {
-				kfree(tmpbuf);
-				return -1;
-			}
+			if (iscsi_check_acceptor_state(param, value, conn) < 0)
+				goto free_buffer;
+
 			SET_PSTATE_ACCEPTOR(param);
 		}
 	}
 
 	kfree(tmpbuf);
+	return 0;
+
+free_buffer:
+	kfree(tmpbuf);
+	return -1;
+}
+
+/*
+ * Append "key=value" plus a trailing NUL into @textbuf at *@length.
+ * Returns 0 on success and advances *@length, or -EMSGSIZE if the
+ * record (including the NUL) would not fit in the remaining buffer.
+ */
+static int iscsi_encode_text_record(char *textbuf, u32 *length,
+				    u32 textbuf_size,
+				    const char *key, const char *value)
+{
+	int n;
+	u32 avail;
+
+	if (*length >= textbuf_size)
+		return -EMSGSIZE;
+
+	avail = textbuf_size - *length;
+	n = snprintf(textbuf + *length, avail, "%s=%s", key, value);
+	if (n < 0 || (u32)n + 1 > avail)
+		return -EMSGSIZE;
+
+	*length += n + 1;
 	return 0;
 }
 
@@ -1438,13 +1400,13 @@ int iscsi_encode_text_output(
 	u8 sender,
 	char *textbuf,
 	u32 *length,
-	struct iscsi_param_list *param_list)
+	u32 textbuf_size,
+	struct iscsi_param_list *param_list,
+	bool keys_workaround)
 {
-	char *output_buf = NULL;
 	struct iscsi_extra_response *er;
 	struct iscsi_param *param;
-
-	output_buf = textbuf + *length;
+	int ret;
 
 	if (iscsi_enforce_integrity_rules(phase, param_list) < 0)
 		return -1;
@@ -1456,10 +1418,12 @@ int iscsi_encode_text_output(
 		    !IS_PSTATE_RESPONSE_SENT(param) &&
 		    !IS_PSTATE_REPLY_OPTIONAL(param) &&
 		    (param->phase & phase)) {
-			*length += sprintf(output_buf, "%s=%s",
-				param->name, param->value);
-			*length += 1;
-			output_buf = textbuf + *length;
+			ret = iscsi_encode_text_record(textbuf, length,
+						       textbuf_size,
+						       param->name,
+						       param->value);
+			if (ret < 0)
+				goto err_overflow;
 			SET_PSTATE_RESPONSE_SENT(param);
 			pr_debug("Sending key: %s=%s\n",
 				param->name, param->value);
@@ -1469,26 +1433,36 @@ int iscsi_encode_text_output(
 		    !IS_PSTATE_ACCEPTOR(param) &&
 		    !IS_PSTATE_PROPOSER(param) &&
 		    (param->phase & phase)) {
-			*length += sprintf(output_buf, "%s=%s",
-				param->name, param->value);
-			*length += 1;
-			output_buf = textbuf + *length;
+			ret = iscsi_encode_text_record(textbuf, length,
+						       textbuf_size,
+						       param->name,
+						       param->value);
+			if (ret < 0)
+				goto err_overflow;
 			SET_PSTATE_PROPOSER(param);
-			iscsi_check_proposer_for_optional_reply(param);
+			iscsi_check_proposer_for_optional_reply(param,
+							        keys_workaround);
 			pr_debug("Sending key: %s=%s\n",
 				param->name, param->value);
 		}
 	}
 
 	list_for_each_entry(er, &param_list->extra_response_list, er_list) {
-		*length += sprintf(output_buf, "%s=%s", er->key, er->value);
-		*length += 1;
-		output_buf = textbuf + *length;
+		ret = iscsi_encode_text_record(textbuf, length, textbuf_size,
+					       er->key, er->value);
+		if (ret < 0)
+			goto err_overflow;
 		pr_debug("Sending key: %s=%s\n", er->key, er->value);
 	}
 	iscsi_release_extra_responses(param_list);
 
 	return 0;
+
+err_overflow:
+	pr_err("iSCSI login response buffer (%u bytes) exhausted, dropping login.\n",
+	       textbuf_size);
+	iscsi_release_extra_responses(param_list);
+	return -1;
 }
 
 int iscsi_check_negotiated_keys(struct iscsi_param_list *param_list)

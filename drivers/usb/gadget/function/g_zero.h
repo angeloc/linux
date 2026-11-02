@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This header declares the utility functions used by "Gadget Zero", plus
  * interfaces to its two single-configuration function drivers.
@@ -33,6 +34,7 @@ struct f_ss_opts {
 	unsigned isoc_mult;
 	unsigned isoc_maxburst;
 	unsigned bulk_buflen;
+	unsigned bulk_maxburst;
 	unsigned bulk_qlen;
 	unsigned iso_qlen;
 

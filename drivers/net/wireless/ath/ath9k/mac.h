@@ -16,6 +16,7 @@
 
 #ifndef MAC_H
 #define MAC_H
+#include <net/cfg80211.h>
 
 #define set11nTries(_series, _index) \
 	(SM((_series)[_index].Tries, AR_XmitDataTries##_index))
@@ -34,8 +35,10 @@
 	 |((_series)[_index].RateFlags & ATH9K_RATESERIES_HALFGI ?	\
 	   AR_GI##_index : 0)						\
 	 |((_series)[_index].RateFlags & ATH9K_RATESERIES_STBC ?	\
-	   AR_STBC##_index : 0)						\
-	 |SM((_series)[_index].ChSel, AR_ChainSel##_index))
+	   AR_STBC##_index : 0))
+
+#define set11nChainSel(_series, _index)					\
+	(SM((_series)[_index].ChSel, AR_ChainSel##_index))
 
 #define CCK_SIFS_TIME        10
 #define CCK_PREAMBLE_BITS   144
@@ -112,8 +115,10 @@ struct ath_tx_status {
 	u8 qid;
 	u16 desc_id;
 	u8 tid;
-	u32 ba_low;
-	u32 ba_high;
+	struct_group(ba,
+		u32 ba_low;
+		u32 ba_high;
+	);
 	u32 evm0;
 	u32 evm1;
 	u32 evm2;
@@ -143,7 +148,8 @@ struct ath_rx_status {
 	u32 evm2;
 	u32 evm3;
 	u32 evm4;
-	u32 flag; /* see enum mac80211_rx_flags */
+	u16 enc_flags;
+	enum rate_info_bw bw;
 };
 
 struct ath_htc_rx_status {
@@ -245,7 +251,7 @@ struct ath_desc {
  * when the descriptor is specifically marked to generate
  * an interrupt with this flag. Descriptors should be
  * marked periodically to insure timely replenishing of the
- * supply needed for sending frames. Defering interrupts
+ * supply needed for sending frames. Deferring interrupts
  * reduces system load and potentially allows more concurrent
  * work to be done but if done to aggressively can cause
  * senders to backup. When the hardware queue is left too
@@ -744,6 +750,7 @@ void ath9k_hw_set_interrupts(struct ath_hw *ah);
 void ath9k_hw_enable_interrupts(struct ath_hw *ah);
 void ath9k_hw_disable_interrupts(struct ath_hw *ah);
 void ath9k_hw_kill_interrupts(struct ath_hw *ah);
+void ath9k_hw_resume_interrupts(struct ath_hw *ah);
 
 void ar9002_hw_attach_mac_ops(struct ath_hw *ah);
 

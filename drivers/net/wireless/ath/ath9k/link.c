@@ -20,20 +20,13 @@
  * TX polling - checks if the TX engine is stuck somewhere
  * and issues a chip reset if so.
  */
-void ath_tx_complete_poll_work(struct work_struct *work)
+static bool ath_tx_complete_check(struct ath_softc *sc)
 {
-	struct ath_softc *sc = container_of(work, struct ath_softc,
-					    tx_complete_work.work);
 	struct ath_txq *txq;
 	int i;
-	bool needreset = false;
 
-
-	if (sc->tx99_state) {
-		ath_dbg(ath9k_hw_common(sc->sc_ah), RESET,
-			"skip tx hung detection on tx99\n");
-		return;
-	}
+	if (sc->tx99_state)
+		return true;
 
 	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
 		txq = sc->tx.txq_map[i];
@@ -41,25 +34,65 @@ void ath_tx_complete_poll_work(struct work_struct *work)
 		ath_txq_lock(sc, txq);
 		if (txq->axq_depth) {
 			if (txq->axq_tx_inprogress) {
-				needreset = true;
 				ath_txq_unlock(sc, txq);
-				break;
-			} else {
-				txq->axq_tx_inprogress = true;
+				goto reset;
 			}
+
+			txq->axq_tx_inprogress = true;
 		}
 		ath_txq_unlock(sc, txq);
 	}
 
-	if (needreset) {
-		ath_dbg(ath9k_hw_common(sc->sc_ah), RESET,
-			"tx hung, resetting the chip\n");
-		ath9k_queue_reset(sc, RESET_TYPE_TX_HANG);
-		return;
-	}
+	return true;
 
-	ieee80211_queue_delayed_work(sc->hw, &sc->tx_complete_work,
-				     msecs_to_jiffies(ATH_TX_COMPLETE_POLL_INT));
+reset:
+	ath_dbg(ath9k_hw_common(sc->sc_ah), RESET,
+		"tx hung, resetting the chip\n");
+	ath9k_queue_reset(sc, RESET_TYPE_TX_HANG);
+	return false;
+}
+
+#define RX_INACTIVE_CHECK_INTERVAL (4 * MSEC_PER_SEC)
+
+static bool ath_hw_rx_inactive_check(struct ath_softc *sc)
+{
+	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
+	u32 interval, count;
+
+	interval = jiffies_to_msecs(jiffies - sc->rx_active_check_time);
+	count = sc->rx_active_count;
+
+	if (interval < RX_INACTIVE_CHECK_INTERVAL)
+		return true; /* too soon to check */
+
+	sc->rx_active_count = 0;
+	sc->rx_active_check_time = jiffies;
+
+	/* Need at least one interrupt per second, and we should only react if
+	 * we are within a factor two of the expected interval
+	 */
+	if (interval > RX_INACTIVE_CHECK_INTERVAL * 2 ||
+	    count >= interval / MSEC_PER_SEC)
+		return true;
+
+	ath_dbg(common, RESET,
+		"RX inactivity detected. Schedule chip reset\n");
+	ath9k_queue_reset(sc, RESET_TYPE_RX_INACTIVE);
+
+	return false;
+}
+
+void ath_hw_check_work(struct work_struct *work)
+{
+	struct ath_softc *sc = container_of(work, struct ath_softc,
+					    hw_check_work.work);
+
+	if (!ath_hw_check(sc) || !ath_tx_complete_check(sc) ||
+	    !ath_hw_rx_inactive_check(sc))
+		return;
+
+	ieee80211_queue_delayed_work(sc->hw, &sc->hw_check_work,
+				     msecs_to_jiffies(ATH_HW_CHECK_POLL_INT));
 }
 
 /*
@@ -297,11 +330,11 @@ fail_paprd:
  *  When the task is complete, it reschedules itself depending on the
  *  appropriate interval that was calculated.
  */
-void ath_ani_calibrate(unsigned long data)
+void ath_ani_calibrate(struct timer_list *t)
 {
-	struct ath_softc *sc = (struct ath_softc *)data;
+	struct ath_common *common = timer_container_of(common, t, ani.timer);
+	struct ath_softc *sc = common->priv;
 	struct ath_hw *ah = sc->sc_ah;
-	struct ath_common *common = ath9k_hw_common(ah);
 	bool longcal = false;
 	bool shortcal = false;
 	bool aniflag = false;
@@ -363,10 +396,10 @@ void ath_ani_calibrate(unsigned long data)
 
 	/* Call ANI routine if necessary */
 	if (aniflag) {
-		spin_lock(&common->cc_lock);
+		spin_lock_irqsave(&common->cc_lock, flags);
 		ath9k_hw_ani_monitor(ah, ah->curchan);
 		ath_update_survey_stats(sc);
-		spin_unlock(&common->cc_lock);
+		spin_unlock_irqrestore(&common->cc_lock, flags);
 	}
 
 	/* Perform calibration if necessary */
@@ -439,7 +472,7 @@ void ath_stop_ani(struct ath_softc *sc)
 	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 
 	ath_dbg(common, ANI, "Stopping ANI\n");
-	del_timer_sync(&common->ani.timer);
+	timer_delete_sync(&common->ani.timer);
 }
 
 void ath_check_ani(struct ath_softc *sc)

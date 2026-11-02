@@ -6,22 +6,35 @@
  * This is the main hub from which the sub-commands (perf stat,
  * perf top, perf record, perf report, etc.) are started.
  */
-#include "builtin.h"
 
-#include "util/env.h"
-#include <subcmd/exec-cmd.h>
-#include "util/config.h"
-#include "util/quote.h"
-#include <subcmd/run-command.h>
-#include "util/parse-events.h"
-#include <subcmd/parse-options.h>
-#include "util/bpf-loader.h"
-#include "util/debug.h"
-#include <api/fs/fs.h>
-#include <api/fs/tracing_path.h>
-#include <pthread.h>
+#include <linux/compiler.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
+
+#include <linux/string.h>
+#include <linux/zalloc.h>
+#include <sys/stat.h>
+
+#include <api/fs/tracing_path.h>
+#include <perf/core.h>
+#include <subcmd/exec-cmd.h>
+#include <subcmd/help.h>
+#include <subcmd/pager.h>
+#include <subcmd/parse-options.h>
+#include <subcmd/run-command.h>
+
+#include "builtin.h"
+#include "ui/ui.h"
+#include "util/build-id.h"
+#include "util/config.h"
+#include "util/debug.h"
+#ifdef HAVE_LIBTRACEEVENT
+#include "util/trace-event.h"
+#endif
 
 const char perf_usage_string[] =
 	"perf [--version] [--help] [OPTIONS] COMMAND [ARGS]";
@@ -29,23 +42,71 @@ const char perf_usage_string[] =
 const char perf_more_info_string[] =
 	"See 'perf help COMMAND' for more information on a specific command.";
 
-int use_browser = -1;
+static void __noreturn usage(const char *err)
+{
+	fprintf(stderr, "\n Usage: %s\n", err);
+	exit(129);
+}
+
+#define CMD_EXEC_PATH "--exec-path"
+#define CMD_DEBUGFS_DIR "--debugfs-dir="
+
+#define EXEC_PATH_ENVIRONMENT "PERF_EXEC_PATH"
+#define PERF_PAGER_ENVIRONMENT "PERF_PAGER"
+
 static int use_pager = -1;
-const char *input_name;
+static FILE *debug_fp = NULL;
+
+
+#ifndef HAVE_LIBTRACEEVENT
+#define DECLARE_LIBTRACEEVENT_STUB(_cmd) \
+	int cmd_##_cmd(int argc __always_unused, const char **argv __always_unused) \
+	{ \
+		fprintf(stderr, \
+			"'" #_cmd "' command not available: missing libtraceevent " \
+			"devel package at build time.\n"); \
+		return -1; \
+	}
+
+DECLARE_LIBTRACEEVENT_STUB(timechart)
+DECLARE_LIBTRACEEVENT_STUB(sched)
+DECLARE_LIBTRACEEVENT_STUB(kmem)
+DECLARE_LIBTRACEEVENT_STUB(lock)
+DECLARE_LIBTRACEEVENT_STUB(trace)
+DECLARE_LIBTRACEEVENT_STUB(kwork)
+#endif
+
+#ifndef HAVE_LIBELF_SUPPORT
+#define DECLARE_LIBELF_SUPPORT_STUB(_cmd) \
+	int cmd_##_cmd(int argc __always_unused, const char **argv __always_unused) \
+	{ \
+		fprintf(stderr, \
+			"'" #_cmd "' command not available: missing libelf " \
+			"devel package at build time.\n"); \
+		return -1; \
+	}
+
+DECLARE_LIBELF_SUPPORT_STUB(probe)
+#endif
 
 struct cmd_struct {
 	const char *cmd;
-	int (*fn)(int, const char **, const char *);
+	int (*fn)(int, const char **);
 	int option;
 };
 
-static struct cmd_struct commands[] = {
+static const struct cmd_struct commands[] = {
+	{ "archive",	NULL,	0 },
 	{ "buildid-cache", cmd_buildid_cache, 0 },
 	{ "buildid-list", cmd_buildid_list, 0 },
+	{ "check",	cmd_check,	0 },
 	{ "config",	cmd_config,	0 },
+	{ "c2c",	cmd_c2c,	0 },
 	{ "diff",	cmd_diff,	0 },
 	{ "evlist",	cmd_evlist,	0 },
 	{ "help",	cmd_help,	0 },
+	{ "iostat",	NULL,	0 },
+	{ "kallsyms",	cmd_kallsyms,	0 },
 	{ "list",	cmd_list,	0 },
 	{ "record",	cmd_record,	0 },
 	{ "report",	cmd_report,	0 },
@@ -57,19 +118,18 @@ static struct cmd_struct commands[] = {
 	{ "version",	cmd_version,	0 },
 	{ "script",	cmd_script,	0 },
 	{ "sched",	cmd_sched,	0 },
-#ifdef HAVE_LIBELF_SUPPORT
 	{ "probe",	cmd_probe,	0 },
-#endif
 	{ "kmem",	cmd_kmem,	0 },
 	{ "lock",	cmd_lock,	0 },
 	{ "kvm",	cmd_kvm,	0 },
 	{ "test",	cmd_test,	0 },
-#ifdef HAVE_LIBAUDIT_SUPPORT
 	{ "trace",	cmd_trace,	0 },
-#endif
 	{ "inject",	cmd_inject,	0 },
 	{ "mem",	cmd_mem,	0 },
 	{ "data",	cmd_data,	0 },
+	{ "ftrace",	cmd_ftrace,	0 },
+	{ "daemon",	cmd_daemon,	0 },
+	{ "kwork",	cmd_kwork,	0 },
 };
 
 struct pager_config {
@@ -77,30 +137,37 @@ struct pager_config {
 	int val;
 };
 
+static bool same_cmd_with_prefix(const char *var, struct pager_config *c,
+				  const char *header)
+{
+	return (strstarts(var, header) && !strcmp(var + strlen(header), c->cmd));
+}
+
 static int pager_command_config(const char *var, const char *value, void *data)
 {
 	struct pager_config *c = data;
-	if (!prefixcmp(var, "pager.") && !strcmp(var + 6, c->cmd))
+	if (same_cmd_with_prefix(var, c, "pager."))
 		c->val = perf_config_bool(var, value);
 	return 0;
 }
 
 /* returns 0 for "no pager", 1 for "use pager", and -1 for "not specified" */
-int check_pager_config(const char *cmd)
+static int check_pager_config(const char *cmd)
 {
+	int err;
 	struct pager_config c;
 	c.cmd = cmd;
 	c.val = -1;
-	perf_config(pager_command_config, &c);
-	return c.val;
+	err = perf_config(pager_command_config, &c);
+	return err ?: c.val;
 }
 
 static int browser_command_config(const char *var, const char *value, void *data)
 {
 	struct pager_config *c = data;
-	if (!prefixcmp(var, "tui.") && !strcmp(var + 4, c->cmd))
+	if (same_cmd_with_prefix(var, c, "tui."))
 		c->val = perf_config_bool(var, value);
-	if (!prefixcmp(var, "gtk.") && !strcmp(var + 4, c->cmd))
+	if (same_cmd_with_prefix(var, c, "gtk."))
 		c->val = perf_config_bool(var, value) ? 2 : 0;
 	return 0;
 }
@@ -111,11 +178,12 @@ static int browser_command_config(const char *var, const char *value, void *data
  */
 static int check_browser_config(const char *cmd)
 {
+	int err;
 	struct pager_config c;
 	c.cmd = cmd;
 	c.val = -1;
-	perf_config(browser_command_config, &c);
-	return c.val;
+	err = perf_config(browser_command_config, &c);
+	return err ?: c.val;
 }
 
 static void commit_pager_choice(void)
@@ -132,7 +200,20 @@ static void commit_pager_choice(void)
 	}
 }
 
-struct option options[] = {
+static int set_debug_file(const char *path)
+{
+	debug_fp = fopen(path, "w");
+	if (!debug_fp) {
+		fprintf(stderr, "Open debug file '%s' failed: %m\n",
+			path);
+		return -1;
+	}
+
+	debug_set_file(debug_fp);
+	return 0;
+}
+
+static const struct option options[] = {
 	OPT_ARGUMENT("help", "help"),
 	OPT_ARGUMENT("version", "version"),
 	OPT_ARGUMENT("exec-path", "exec-path"),
@@ -144,6 +225,7 @@ struct option options[] = {
 	OPT_ARGUMENT("list-cmds", "list-cmds"),
 	OPT_ARGUMENT("list-opts", "list-opts"),
 	OPT_ARGUMENT("debug", "debug"),
+	OPT_ARGUMENT("debug-file", "debug-file"),
 	OPT_END()
 };
 
@@ -178,10 +260,16 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 			break;
 		}
 
+		if (!strcmp(cmd, "-vv")) {
+			(*argv)[0] = "version";
+			verbose = 1;
+			break;
+		}
+
 		/*
 		 * Check remaining flags.
 		 */
-		if (!prefixcmp(cmd, CMD_EXEC_PATH)) {
+		if (strstarts(cmd, CMD_EXEC_PATH)) {
 			cmd += strlen(CMD_EXEC_PATH);
 			if (*cmd == '=')
 				set_argv_exec_path(cmd + 1);
@@ -218,16 +306,16 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 				*envchanged = 1;
 			(*argv)++;
 			(*argc)--;
-		} else if (!prefixcmp(cmd, CMD_DEBUGFS_DIR)) {
+		} else if (strstarts(cmd, CMD_DEBUGFS_DIR)) {
 			tracing_path_set(cmd + strlen(CMD_DEBUGFS_DIR));
-			fprintf(stderr, "dir: %s\n", tracing_path);
+			fprintf(stderr, "dir: %s\n", tracing_path_mount());
 			if (envchanged)
 				*envchanged = 1;
 		} else if (!strcmp(cmd, "--list-cmds")) {
 			unsigned int i;
 
 			for (i = 0; i < ARRAY_SIZE(commands); i++) {
-				struct cmd_struct *p = commands+i;
+				const struct cmd_struct *p = commands + i;
 				printf("%s ", p->cmd);
 			}
 			putchar('\n');
@@ -236,7 +324,7 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 			unsigned int i;
 
 			for (i = 0; i < ARRAY_SIZE(options)-1; i++) {
-				struct option *p = options+i;
+				const struct option *p = options + i;
 				printf("--%s ", p->long_name);
 			}
 			putchar('\n');
@@ -251,6 +339,18 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 
 			(*argv)++;
 			(*argc)--;
+		} else if (!strcmp(cmd, "--debug-file")) {
+			if (*argc < 2) {
+				fprintf(stderr, "No path given for --debug-file.\n");
+				usage(perf_usage_string);
+			}
+
+			if (set_debug_file((*argv)[1]))
+				usage(perf_usage_string);
+
+			(*argv)++;
+			(*argc)--;
+
 		} else {
 			fprintf(stderr, "Unknown option: %s\n", cmd);
 			usage(perf_usage_string);
@@ -263,86 +363,13 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 	return handled;
 }
 
-static int handle_alias(int *argcp, const char ***argv)
-{
-	int envchanged = 0, ret = 0, saved_errno = errno;
-	int count, option_count;
-	const char **new_argv;
-	const char *alias_command;
-	char *alias_string;
-
-	alias_command = (*argv)[0];
-	alias_string = alias_lookup(alias_command);
-	if (alias_string) {
-		if (alias_string[0] == '!') {
-			if (*argcp > 1) {
-				struct strbuf buf;
-
-				if (strbuf_init(&buf, PATH_MAX) < 0 ||
-				    strbuf_addstr(&buf, alias_string) < 0 ||
-				    sq_quote_argv(&buf, (*argv) + 1,
-						  PATH_MAX) < 0)
-					die("Failed to allocate memory.");
-				free(alias_string);
-				alias_string = buf.buf;
-			}
-			ret = system(alias_string + 1);
-			if (ret >= 0 && WIFEXITED(ret) &&
-			    WEXITSTATUS(ret) != 127)
-				exit(WEXITSTATUS(ret));
-			die("Failed to run '%s' when expanding alias '%s'",
-			    alias_string + 1, alias_command);
-		}
-		count = split_cmdline(alias_string, &new_argv);
-		if (count < 0)
-			die("Bad alias.%s string", alias_command);
-		option_count = handle_options(&new_argv, &count, &envchanged);
-		if (envchanged)
-			die("alias '%s' changes environment variables\n"
-				 "You can use '!perf' in the alias to do this.",
-				 alias_command);
-		memmove(new_argv - option_count, new_argv,
-				count * sizeof(char *));
-		new_argv -= option_count;
-
-		if (count < 1)
-			die("empty alias for %s", alias_command);
-
-		if (!strcmp(alias_command, new_argv[0]))
-			die("recursive alias: %s", alias_command);
-
-		new_argv = realloc(new_argv, sizeof(char *) *
-				    (count + *argcp + 1));
-		/* insert after command name */
-		memcpy(new_argv + count, *argv + 1, sizeof(char *) * *argcp);
-		new_argv[count + *argcp] = NULL;
-
-		*argv = new_argv;
-		*argcp += count - 1;
-
-		ret = 1;
-	}
-
-	errno = saved_errno;
-
-	return ret;
-}
-
-const char perf_version_string[] = PERF_VERSION;
-
 #define RUN_SETUP	(1<<0)
 #define USE_PAGER	(1<<1)
 
-static int run_builtin(struct cmd_struct *p, int argc, const char **argv)
+static int run_builtin(const struct cmd_struct *p, int argc, const char **argv)
 {
 	int status;
 	struct stat st;
-	const char *prefix;
-	char sbuf[STRERR_BUFSIZE];
-
-	prefix = NULL;
-	if (p->option & RUN_SETUP)
-		prefix = NULL; /* setup_perf_directory(); */
 
 	if (use_browser == -1)
 		use_browser = check_browser_config(p->cmd);
@@ -353,12 +380,12 @@ static int run_builtin(struct cmd_struct *p, int argc, const char **argv)
 		use_pager = 1;
 	commit_pager_choice();
 
-	perf_env__set_cmdline(&perf_env, argc, argv);
-	status = p->fn(argc, argv, prefix);
+	status = p->fn(argc, argv);
 	perf_config__exit();
+#ifdef HAVE_LIBTRACEEVENT
+	trace_event__exit();
+#endif
 	exit_browser(status);
-	perf_env__exit(&perf_env);
-	bpf__clear();
 
 	if (status)
 		return status & 0xff;
@@ -373,17 +400,15 @@ static int run_builtin(struct cmd_struct *p, int argc, const char **argv)
 	status = 1;
 	/* Check for ENOSPC and EIO errors.. */
 	if (fflush(stdout)) {
-		fprintf(stderr, "write failure on standard output: %s",
-			str_error_r(errno, sbuf, sizeof(sbuf)));
+		fprintf(stderr, "write failure on standard output: %m\n");
 		goto out;
 	}
 	if (ferror(stdout)) {
-		fprintf(stderr, "unknown write failure on standard output");
+		fprintf(stderr, "unknown write failure on standard output\n");
 		goto out;
 	}
 	if (fclose(stdout)) {
-		fprintf(stderr, "close failed on standard output: %s",
-			str_error_r(errno, sbuf, sizeof(sbuf)));
+		fprintf(stderr, "close failed on standard output: %m\n");
 		goto out;
 	}
 	status = 0;
@@ -395,16 +420,6 @@ static void handle_internal_command(int argc, const char **argv)
 {
 	const char *cmd = argv[0];
 	unsigned int i;
-	static const char ext[] = STRIP_EXTENSION;
-
-	if (sizeof(ext) > 1) {
-		i = strlen(argv[0]) - strlen(ext);
-		if (i > 0 && !strcmp(argv[0] + i, ext)) {
-			char *argv0 = strdup(argv[0]);
-			argv[0] = cmd = argv0;
-			argv0[i] = '\0';
-		}
-	}
 
 	/* Turn "perf cmd --help" into "perf help cmd" */
 	if (argc > 1 && !strcmp(argv[1], "--help")) {
@@ -413,7 +428,9 @@ static void handle_internal_command(int argc, const char **argv)
 	}
 
 	for (i = 0; i < ARRAY_SIZE(commands); i++) {
-		struct cmd_struct *p = commands+i;
+		const struct cmd_struct *p = commands+i;
+		if (p->fn == NULL)
+			continue;
 		if (strcmp(p->cmd, cmd))
 			continue;
 		exit(run_builtin(p, argc, argv));
@@ -446,7 +463,8 @@ static void execv_dashed_external(const char **argv)
 	if (status != -ERR_RUN_COMMAND_EXEC) {
 		if (IS_RUN_COMMAND_ERR(status)) {
 do_die:
-			die("unable to run '%s'", argv[0]);
+			pr_err("FATAL: unable to run '%s'", argv[0]);
+			status = -128;
 		}
 		exit(-status);
 	}
@@ -458,74 +476,32 @@ do_die:
 
 static int run_argv(int *argcp, const char ***argv)
 {
-	int done_alias = 0;
+	/* See if it's an internal command */
+	handle_internal_command(*argcp, *argv);
 
-	while (1) {
-		/* See if it's an internal command */
-		handle_internal_command(*argcp, *argv);
-
-		/* .. then try the external ones */
-		execv_dashed_external(*argv);
-
-		/* It could be an alias -- this works around the insanity
-		 * of overriding "perf log" with "perf show" by having
-		 * alias.log = show
-		 */
-		if (done_alias || !handle_alias(argcp, argv))
-			break;
-		done_alias = 1;
-	}
-
-	return done_alias;
+	/* .. then try the external ones */
+	execv_dashed_external(*argv);
+	return 0;
 }
 
-static void pthread__block_sigwinch(void)
+static int libperf_print(enum libperf_print_level level,
+			 const char *fmt, va_list ap)
 {
-	sigset_t set;
-
-	sigemptyset(&set);
-	sigaddset(&set, SIGWINCH);
-	pthread_sigmask(SIG_BLOCK, &set, NULL);
+	return veprintf(level, verbose, fmt, ap);
 }
-
-void pthread__unblock_sigwinch(void)
-{
-	sigset_t set;
-
-	sigemptyset(&set);
-	sigaddset(&set, SIGWINCH);
-	pthread_sigmask(SIG_UNBLOCK, &set, NULL);
-}
-
-#ifdef _SC_LEVEL1_DCACHE_LINESIZE
-#define cache_line_size(cacheline_sizep) *cacheline_sizep = sysconf(_SC_LEVEL1_DCACHE_LINESIZE)
-#else
-static void cache_line_size(int *cacheline_sizep)
-{
-	if (sysfs__read_int("devices/system/cpu/cpu0/cache/index0/coherency_line_size", cacheline_sizep))
-		pr_debug("cannot determine cache line size");
-}
-#endif
 
 int main(int argc, const char **argv)
 {
+	int err, done_help = 0;
 	const char *cmd;
-	char sbuf[STRERR_BUFSIZE];
-	int value;
+
+	perf_debug_setup();
 
 	/* libsubcmd init */
 	exec_cmd_init("perf", PREFIX, PERF_EXEC_PATH, EXEC_PATH_ENVIRONMENT);
 	pager_init(PERF_PAGER_ENVIRONMENT);
 
-	/* The page_size is placed in util object. */
-	page_size = sysconf(_SC_PAGE_SIZE);
-	cache_line_size(&cacheline_size);
-
-	if (sysctl__read_int("kernel/perf_event_max_stack", &value) == 0)
-		sysctl_perf_event_max_stack = value;
-
-	if (sysctl__read_int("kernel/perf_event_max_contexts_per_stack", &value) == 0)
-		sysctl_perf_event_max_contexts_per_stack = value;
+	libperf_init(libperf_print);
 
 	cmd = extract_argv0_path(argv[0]);
 	if (!cmd)
@@ -533,12 +509,13 @@ int main(int argc, const char **argv)
 
 	srandom(time(NULL));
 
-	perf_config__init();
-	perf_config(perf_default_config, NULL);
-	set_buildid_dir(NULL);
+	/* Setting $PERF_CONFIG makes perf read _only_ the given config file. */
+	config_exclusive_filename = getenv("PERF_CONFIG");
 
-	/* get debugfs/tracefs mount point from /proc/mounts */
-	tracing_path_mount();
+	err = perf_config(perf_default_config, NULL);
+	if (err)
+		return err;
+	set_buildid_dir(NULL);
 
 	/*
 	 * "perf-xxxx" is the same as "perf xxxx", but we obviously:
@@ -547,26 +524,26 @@ int main(int argc, const char **argv)
 	 *  - cannot execute it externally (since it would just do
 	 *    the same thing over again)
 	 *
-	 * So we just directly call the internal command handler, and
-	 * die if that one cannot handle it.
+	 * So we just directly call the internal command handler. If that one
+	 * fails to handle this, then maybe we just run a renamed perf binary
+	 * that contains a dash in its name. To handle this scenario, we just
+	 * fall through and ignore the "xxxx" part of the command string.
 	 */
-	if (!prefixcmp(cmd, "perf-")) {
+	if (strstarts(cmd, "perf-")) {
 		cmd += 5;
 		argv[0] = cmd;
 		handle_internal_command(argc, argv);
-		fprintf(stderr, "cannot handle %s internally", cmd);
-		goto out;
+		/*
+		 * If the command is handled, the above function does not
+		 * return undo changes and fall through in such a case.
+		 */
+		cmd -= 5;
+		argv[0] = cmd;
 	}
-	if (!prefixcmp(cmd, "trace")) {
-#ifdef HAVE_LIBAUDIT_SUPPORT
+	if (strstarts(cmd, "trace")) {
 		setup_path();
 		argv[0] = "trace";
-		return cmd_trace(argc, argv, NULL);
-#else
-		fprintf(stderr,
-			"trace command not available: missing audit-libs devel package at build time.\n");
-		goto out;
-#endif
+		return cmd_trace(argc, argv);
 	}
 	/* Look for flags.. */
 	argv++;
@@ -575,7 +552,7 @@ int main(int argc, const char **argv)
 	commit_pager_choice();
 
 	if (argc > 0) {
-		if (!prefixcmp(argv[0], "--"))
+		if (strstarts(argv[0], "--"))
 			argv[0] += 2;
 	} else {
 		/* The user didn't specify a command; give them help */
@@ -585,8 +562,6 @@ int main(int argc, const char **argv)
 		goto out;
 	}
 	cmd = argv[0];
-
-	test_attr__init();
 
 	/*
 	 * We use PATH to find perf commands, but we prepend some higher
@@ -602,30 +577,36 @@ int main(int argc, const char **argv)
 	 */
 	pthread__block_sigwinch();
 
-	perf_debug_setup();
-
 	while (1) {
-		static int done_help;
-		int was_alias = run_argv(&argc, &argv);
+		run_argv(&argc, &argv);
 
 		if (errno != ENOENT)
 			break;
 
-		if (was_alias) {
-			fprintf(stderr, "Expansion of alias '%s' failed; "
-				"'%s' is not a perf-command\n",
-				cmd, argv[0]);
-			goto out;
-		}
 		if (!done_help) {
-			cmd = argv[0] = help_unknown_cmd(cmd);
+			struct cmdnames main_cmds = {};
+
+			for (unsigned int i = 0; i < ARRAY_SIZE(commands); i++) {
+				add_cmdname(&main_cmds,
+					    commands[i].cmd,
+					    strlen(commands[i].cmd));
+			}
+			cmd = argv[0] = help_unknown_cmd(cmd, &main_cmds);
+			clean_cmdnames(&main_cmds);
 			done_help = 1;
+			if (!cmd)
+				break;
 		} else
 			break;
 	}
 
-	fprintf(stderr, "Failed to run command '%s': %s\n",
-		cmd, str_error_r(errno, sbuf, sizeof(sbuf)));
+	if (cmd) {
+		fprintf(stderr, "Failed to run command '%s': %m\n",
+			cmd);
+	}
 out:
+	if (debug_fp)
+		fclose(debug_fp);
+
 	return 1;
 }

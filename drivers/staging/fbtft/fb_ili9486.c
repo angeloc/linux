@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * FB driver for the ILI9486 LCD Controller
  *
  * Copyright (C) 2014 Noralf Tronnes
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -26,7 +17,7 @@
 #define HEIGHT		480
 
 /* this init sequence matches PiScreen */
-static int default_init_sequence[] = {
+static const s16 default_init_sequence[] = {
 	/* Interface Mode Control */
 	-1, 0xb0, 0x0,
 	-1, MIPI_DCS_EXIT_SLEEP_MODE,
@@ -51,17 +42,6 @@ static int default_init_sequence[] = {
 	/* end marker */
 	-3
 };
-
-static void set_addr_win(struct fbtft_par *par, int xs, int ys, int xe, int ye)
-{
-	write_reg(par, MIPI_DCS_SET_COLUMN_ADDRESS,
-		  xs >> 8, xs & 0xFF, xe >> 8, xe & 0xFF);
-
-	write_reg(par, MIPI_DCS_SET_PAGE_ADDRESS,
-		  ys >> 8, ys & 0xFF, ye >> 8, ye & 0xFF);
-
-	write_reg(par, MIPI_DCS_WRITE_MEMORY_START);
-}
 
 static int set_var(struct fbtft_par *par)
 {
@@ -95,7 +75,6 @@ static struct fbtft_display display = {
 	.height = HEIGHT,
 	.init_sequence = default_init_sequence,
 	.fbtftops = {
-		.set_addr_win = set_addr_win,
 		.set_var = set_var,
 	},
 };

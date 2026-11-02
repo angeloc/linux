@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * FB driver for the uPD161704 LCD Controller
  *
@@ -6,22 +7,11 @@
  * Based on fb_ili9325.c by Noralf Tronnes
  * Based on ili9325.c by Jeroen Domburg
  * Init code from UTFT library by Henning Karlsen
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/gpio.h>
 #include <linux/delay.h>
 
 #include "fbtft.h"
@@ -34,9 +24,6 @@
 static int init_display(struct fbtft_par *par)
 {
 	par->fbtftops.reset(par);
-
-	if (par->gpio.cs != -1)
-		gpio_set_value(par->gpio.cs, 0);  /* Activate chip */
 
 	/* Initialization sequence from Lib_UTFT */
 
@@ -80,7 +67,7 @@ static int init_display(struct fbtft_par *par)
 	write_reg(par, 0x001D, 0x0000);	/* Regulator current setting */
 	write_reg(par, 0x001E, 0x0009);	/* VCOM output setting */
 	write_reg(par, 0x001F, 0x0035);	/* VCOM amplitude setting */
-	write_reg(par, 0x0020, 0x0015);	/* VCOMM cencter setting */
+	write_reg(par, 0x0020, 0x0015);	/* VCOMM center setting */
 	write_reg(par, 0x0018, 0x1E7B);	/* DC/DC operation setting */
 
 	/* windows setting */

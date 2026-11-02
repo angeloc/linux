@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * pxa910 clock framework source file
  *
  * Copyright (C) 2012 Marvell
  * Chao Xie <xiechao.mail@gmail.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/module.h>
@@ -46,6 +43,8 @@
 #define APMU_CCIC0	0x50
 #define APMU_DFC	0x60
 #define MPMU_UART_PLL	0x14
+
+#define NR_CLKS		200
 
 struct pxa910_clk_unit {
 	struct mmp_clk_unit unit;
@@ -87,8 +86,8 @@ static struct mmp_clk_factor_masks uart_factor_masks = {
 	.den_shift = 0,
 };
 
-static struct mmp_clk_factor_tbl uart_factor_tbl[] = {
-	{.num = 8125, .den = 1536},	/*14.745MHZ */
+static struct u32_fract uart_factor_tbl[] = {
+	{ .numerator = 8125, .denominator = 1536 },	/* 14.745MHZ */
 };
 
 static void pxa910_pll_init(struct pxa910_clk_unit *pxa_unit)
@@ -240,7 +239,7 @@ static void pxa910_clk_reset_init(struct device_node *np,
 	nr_resets_apbc = ARRAY_SIZE(apbc_gate_clks);
 	nr_resets_apbcp = ARRAY_SIZE(apbcp_gate_clks);
 	nr_resets = nr_resets_apbc + nr_resets_apbcp;
-	cells = kcalloc(nr_resets, sizeof(*cells), GFP_KERNEL);
+	cells = kzalloc_objs(*cells, nr_resets);
 	if (!cells)
 		return;
 
@@ -271,35 +270,35 @@ static void __init pxa910_clk_init(struct device_node *np)
 {
 	struct pxa910_clk_unit *pxa_unit;
 
-	pxa_unit = kzalloc(sizeof(*pxa_unit), GFP_KERNEL);
+	pxa_unit = kzalloc_obj(*pxa_unit);
 	if (!pxa_unit)
 		return;
 
 	pxa_unit->mpmu_base = of_iomap(np, 0);
 	if (!pxa_unit->mpmu_base) {
 		pr_err("failed to map mpmu registers\n");
-		return;
+		goto free_memory;
 	}
 
 	pxa_unit->apmu_base = of_iomap(np, 1);
-	if (!pxa_unit->mpmu_base) {
+	if (!pxa_unit->apmu_base) {
 		pr_err("failed to map apmu registers\n");
-		return;
+		goto unmap_mpmu_region;
 	}
 
 	pxa_unit->apbc_base = of_iomap(np, 2);
 	if (!pxa_unit->apbc_base) {
 		pr_err("failed to map apbc registers\n");
-		return;
+		goto unmap_apmu_region;
 	}
 
 	pxa_unit->apbcp_base = of_iomap(np, 3);
-	if (!pxa_unit->mpmu_base) {
+	if (!pxa_unit->apbcp_base) {
 		pr_err("failed to map apbcp registers\n");
-		return;
+		goto unmap_apbc_region;
 	}
 
-	mmp_clk_init(np, &pxa_unit->unit, PXA910_NR_CLKS);
+	mmp_clk_init(np, &pxa_unit->unit, NR_CLKS);
 
 	pxa910_pll_init(pxa_unit);
 
@@ -308,6 +307,17 @@ static void __init pxa910_clk_init(struct device_node *np)
 	pxa910_axi_periph_clk_init(pxa_unit);
 
 	pxa910_clk_reset_init(np, pxa_unit);
+
+	return;
+
+unmap_apbc_region:
+	iounmap(pxa_unit->apbc_base);
+unmap_apmu_region:
+	iounmap(pxa_unit->apmu_base);
+unmap_mpmu_region:
+	iounmap(pxa_unit->mpmu_base);
+free_memory:
+	kfree(pxa_unit);
 }
 
 CLK_OF_DECLARE(pxa910_clk, "marvell,pxa910-clock", pxa910_clk_init);

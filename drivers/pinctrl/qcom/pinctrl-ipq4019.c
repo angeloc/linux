@@ -1,20 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/pinctrl/pinctrl.h>
 
 #include "pinctrl-msm.h"
 
@@ -224,44 +215,37 @@ DECLARE_QCA_GPIO_PINS(97);
 DECLARE_QCA_GPIO_PINS(98);
 DECLARE_QCA_GPIO_PINS(99);
 
-#define FUNCTION(fname)			                \
-	[qca_mux_##fname] = {		                \
-		.name = #fname,				\
-		.groups = fname##_groups,               \
-		.ngroups = ARRAY_SIZE(fname##_groups),	\
-	}
-
 #define PINGROUP(id, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14) \
 	{					        \
-		.name = "gpio" #id,			\
-		.pins = gpio##id##_pins,		\
-		.npins = (unsigned)ARRAY_SIZE(gpio##id##_pins),	\
+		.grp = PINCTRL_PINGROUP("gpio" #id, 	\
+			gpio##id##_pins, 		\
+			ARRAY_SIZE(gpio##id##_pins)),	\
 		.funcs = (int[]){			\
-			qca_mux_gpio, /* gpio mode */	\
-			qca_mux_##f1,			\
-			qca_mux_##f2,			\
-			qca_mux_##f3,			\
-			qca_mux_##f4,			\
-			qca_mux_##f5,			\
-			qca_mux_##f6,			\
-			qca_mux_##f7,			\
-			qca_mux_##f8,			\
-			qca_mux_##f9,			\
-			qca_mux_##f10,			\
-			qca_mux_##f11,			\
-			qca_mux_##f12,			\
-			qca_mux_##f13,			\
-			qca_mux_##f14			\
+			msm_mux_gpio, /* gpio mode */	\
+			msm_mux_##f1,			\
+			msm_mux_##f2,			\
+			msm_mux_##f3,			\
+			msm_mux_##f4,			\
+			msm_mux_##f5,			\
+			msm_mux_##f6,			\
+			msm_mux_##f7,			\
+			msm_mux_##f8,			\
+			msm_mux_##f9,			\
+			msm_mux_##f10,			\
+			msm_mux_##f11,			\
+			msm_mux_##f12,			\
+			msm_mux_##f13,			\
+			msm_mux_##f14			\
 		},				        \
 		.nfuncs = 15,				\
 		.ctl_reg = 0x0 + 0x1000 * id,		\
 		.io_reg = 0x4 + 0x1000 * id,		\
 		.intr_cfg_reg = 0x8 + 0x1000 * id,	\
 		.intr_status_reg = 0xc + 0x1000 * id,	\
-		.intr_target_reg = 0x8 + 0x1000 * id,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
+		.od_bit = 12,			\
 		.oe_bit = 9,			\
 		.in_bit = 0,			\
 		.out_bit = 1,			\
@@ -276,14 +260,51 @@ DECLARE_QCA_GPIO_PINS(99);
 
 
 enum ipq4019_functions {
-	qca_mux_gpio,
-	qca_mux_blsp_uart1,
-	qca_mux_blsp_i2c0,
-	qca_mux_blsp_i2c1,
-	qca_mux_blsp_uart0,
-	qca_mux_blsp_spi1,
-	qca_mux_blsp_spi0,
-	qca_mux_NA,
+	msm_mux_gpio,
+	msm_mux_aud_pin,
+	msm_mux_audio_pwm,
+	msm_mux_blsp_i2c0,
+	msm_mux_blsp_i2c1,
+	msm_mux_blsp_spi0,
+	msm_mux_blsp_spi1,
+	msm_mux_blsp_uart0,
+	msm_mux_blsp_uart1,
+	msm_mux_chip_rst,
+	msm_mux_i2s_rx,
+	msm_mux_i2s_spdif_in,
+	msm_mux_i2s_spdif_out,
+	msm_mux_i2s_td,
+	msm_mux_i2s_tx,
+	msm_mux_jtag,
+	msm_mux_led0,
+	msm_mux_led1,
+	msm_mux_led2,
+	msm_mux_led3,
+	msm_mux_led4,
+	msm_mux_led5,
+	msm_mux_led6,
+	msm_mux_led7,
+	msm_mux_led8,
+	msm_mux_led9,
+	msm_mux_led10,
+	msm_mux_led11,
+	msm_mux_mdc,
+	msm_mux_mdio,
+	msm_mux_pcie,
+	msm_mux_pmu,
+	msm_mux_prng_rosc,
+	msm_mux_qpic,
+	msm_mux_rgmii,
+	msm_mux_rmii,
+	msm_mux_sdio,
+	msm_mux_smart0,
+	msm_mux_smart1,
+	msm_mux_smart2,
+	msm_mux_smart3,
+	msm_mux_tm,
+	msm_mux_wifi0,
+	msm_mux_wifi1,
+	msm_mux_NA,
 };
 
 static const char * const gpio_groups[] = {
@@ -303,108 +324,362 @@ static const char * const gpio_groups[] = {
 	"gpio92", "gpio93", "gpio94", "gpio95", "gpio96", "gpio97", "gpio98",
 	"gpio99",
 };
-
-static const char * const blsp_uart1_groups[] = {
-	"gpio8", "gpio9", "gpio10", "gpio11",
+static const char * const aud_pin_groups[] = {
+	"gpio48", "gpio49", "gpio50", "gpio51",
+};
+static const char * const audio_pwm_groups[] = {
+	"gpio30", "gpio31", "gpio32", "gpio33", "gpio64", "gpio65", "gpio66",
+	"gpio67",
 };
 static const char * const blsp_i2c0_groups[] = {
 	"gpio10", "gpio11", "gpio20", "gpio21", "gpio58", "gpio59",
 };
-static const char * const blsp_spi0_groups[] = {
-	"gpio12", "gpio13", "gpio14", "gpio15", "gpio45",
-	"gpio54", "gpio55", "gpio56", "gpio57",
-};
 static const char * const blsp_i2c1_groups[] = {
 	"gpio12", "gpio13", "gpio34", "gpio35",
 };
-static const char * const blsp_uart0_groups[] = {
-	"gpio16", "gpio17", "gpio60", "gpio61",
+static const char * const blsp_spi0_groups[] = {
+	"gpio12", "gpio13", "gpio14", "gpio15", "gpio45", "gpio54", "gpio55",
+	"gpio56", "gpio57",
 };
 static const char * const blsp_spi1_groups[] = {
 	"gpio44", "gpio45", "gpio46", "gpio47",
 };
+static const char * const blsp_uart0_groups[] = {
+	"gpio16", "gpio17", "gpio60", "gpio61",
+};
+static const char * const blsp_uart1_groups[] = {
+	"gpio8", "gpio9", "gpio10", "gpio11",
+};
+static const char * const chip_rst_groups[] = {
+	"gpio62",
+};
+static const char * const i2s_rx_groups[] = {
+	"gpio0", "gpio1", "gpio2", "gpio20", "gpio21", "gpio22", "gpio23",
+	"gpio58", "gpio60", "gpio61", "gpio63",
+};
+static const char * const i2s_spdif_in_groups[] = {
+	"gpio34", "gpio59", "gpio63",
+};
+static const char * const i2s_spdif_out_groups[] = {
+	"gpio35", "gpio62", "gpio63",
+};
+static const char * const i2s_td_groups[] = {
+	"gpio27", "gpio28", "gpio29", "gpio54", "gpio55", "gpio56", "gpio63",
+};
+static const char * const i2s_tx_groups[] = {
+	"gpio24", "gpio25", "gpio26", "gpio52", "gpio53", "gpio57", "gpio60",
+	"gpio61",
+};
+static const char * const jtag_groups[] = {
+	"gpio0", "gpio1", "gpio2", "gpio3", "gpio4", "gpio5",
+};
+static const char * const led0_groups[] = {
+	"gpio16", "gpio36", "gpio60",
+};
+static const char * const led1_groups[] = {
+	"gpio17", "gpio37", "gpio61",
+};
+static const char * const led2_groups[] = {
+	"gpio36", "gpio38", "gpio58",
+};
+static const char * const led3_groups[] = {
+	"gpio39",
+};
+static const char * const led4_groups[] = {
+	"gpio40",
+};
+static const char * const led5_groups[] = {
+	"gpio44",
+};
+static const char * const led6_groups[] = {
+	"gpio45",
+};
+static const char * const led7_groups[] = {
+	"gpio46",
+};
+static const char * const led8_groups[] = {
+	"gpio47",
+};
+static const char * const led9_groups[] = {
+	"gpio48",
+};
+static const char * const led10_groups[] = {
+	"gpio49",
+};
+static const char * const led11_groups[] = {
+	"gpio50",
+};
+static const char * const mdc_groups[] = {
+	"gpio7", "gpio52",
+};
+static const char * const mdio_groups[] = {
+	"gpio6", "gpio53",
+};
+static const char * const pcie_groups[] = {
+	"gpio39", "gpio52",
+};
+static const char * const pmu_groups[] = {
+	"gpio54", "gpio55",
+};
+static const char * const prng_rosc_groups[] = {
+	"gpio53",
+};
+static const char * const qpic_groups[] = {
+	"gpio52", "gpio53", "gpio54", "gpio55", "gpio56", "gpio57", "gpio58",
+	"gpio59", "gpio60", "gpio61", "gpio62", "gpio63", "gpio64", "gpio65",
+	"gpio66", "gpio67", "gpio68", "gpio69",
+};
+static const char * const rgmii_groups[] = {
+	"gpio22", "gpio23", "gpio24", "gpio25", "gpio26", "gpio27", "gpio28",
+	"gpio29", "gpio30", "gpio31", "gpio32", "gpio33",
+};
+static const char * const rmii_groups[] = {
+	"gpio36", "gpio37", "gpio38", "gpio39", "gpio40", "gpio41", "gpio42",
+	"gpio43", "gpio44", "gpio45", "gpio46", "gpio47", "gpio48", "gpio49",
+	"gpio50", "gpio51",
+};
+static const char * const sdio_groups[] = {
+	"gpio23", "gpio24", "gpio25", "gpio26", "gpio27", "gpio28", "gpio29",
+	"gpio30", "gpio31", "gpio32",
+};
+static const char * const smart0_groups[] = {
+	"gpio0", "gpio1", "gpio2", "gpio5", "gpio44", "gpio45", "gpio46",
+	"gpio47",
+};
+static const char * const smart1_groups[] = {
+	"gpio8", "gpio9", "gpio16", "gpio17", "gpio58", "gpio59", "gpio60",
+	"gpio61",
+};
+static const char * const smart2_groups[] = {
+	"gpio40", "gpio41", "gpio48", "gpio49",
+};
+static const char * const smart3_groups[] = {
+	"gpio58", "gpio59", "gpio60", "gpio61",
+};
+static const char * const tm_groups[] = {
+	"gpio52", "gpio53", "gpio54", "gpio55", "gpio56", "gpio57", "gpio58",
+	"gpio59", "gpio60", "gpio61", "gpio62", "gpio63",
+};
+static const char * const wifi0_groups[] = {
+	"gpio37", "gpio40", "gpio41", "gpio42", "gpio50", "gpio51", "gpio52",
+	"gpio53", "gpio56", "gpio57", "gpio58", "gpio98",
+};
+static const char * const wifi1_groups[] = {
+	"gpio37", "gpio40", "gpio41", "gpio43", "gpio50", "gpio51", "gpio52",
+	"gpio53", "gpio56", "gpio57", "gpio58", "gpio98",
+};
 
-static const struct msm_function ipq4019_functions[] = {
-	FUNCTION(gpio),
-	FUNCTION(blsp_uart1),
-	FUNCTION(blsp_i2c0),
-	FUNCTION(blsp_i2c1),
-	FUNCTION(blsp_uart0),
-	FUNCTION(blsp_spi1),
-	FUNCTION(blsp_spi0),
+static const struct pinfunction ipq4019_functions[] = {
+	MSM_PIN_FUNCTION(aud_pin),
+	MSM_PIN_FUNCTION(audio_pwm),
+	MSM_PIN_FUNCTION(blsp_i2c0),
+	MSM_PIN_FUNCTION(blsp_i2c1),
+	MSM_PIN_FUNCTION(blsp_spi0),
+	MSM_PIN_FUNCTION(blsp_spi1),
+	MSM_PIN_FUNCTION(blsp_uart0),
+	MSM_PIN_FUNCTION(blsp_uart1),
+	MSM_PIN_FUNCTION(chip_rst),
+	MSM_GPIO_PIN_FUNCTION(gpio),
+	MSM_PIN_FUNCTION(i2s_rx),
+	MSM_PIN_FUNCTION(i2s_spdif_in),
+	MSM_PIN_FUNCTION(i2s_spdif_out),
+	MSM_PIN_FUNCTION(i2s_td),
+	MSM_PIN_FUNCTION(i2s_tx),
+	MSM_PIN_FUNCTION(jtag),
+	MSM_PIN_FUNCTION(led0),
+	MSM_PIN_FUNCTION(led1),
+	MSM_PIN_FUNCTION(led2),
+	MSM_PIN_FUNCTION(led3),
+	MSM_PIN_FUNCTION(led4),
+	MSM_PIN_FUNCTION(led5),
+	MSM_PIN_FUNCTION(led6),
+	MSM_PIN_FUNCTION(led7),
+	MSM_PIN_FUNCTION(led8),
+	MSM_PIN_FUNCTION(led9),
+	MSM_PIN_FUNCTION(led10),
+	MSM_PIN_FUNCTION(led11),
+	MSM_PIN_FUNCTION(mdc),
+	MSM_PIN_FUNCTION(mdio),
+	MSM_PIN_FUNCTION(pcie),
+	MSM_PIN_FUNCTION(pmu),
+	MSM_PIN_FUNCTION(prng_rosc),
+	MSM_PIN_FUNCTION(qpic),
+	MSM_PIN_FUNCTION(rgmii),
+	MSM_PIN_FUNCTION(rmii),
+	MSM_PIN_FUNCTION(sdio),
+	MSM_PIN_FUNCTION(smart0),
+	MSM_PIN_FUNCTION(smart1),
+	MSM_PIN_FUNCTION(smart2),
+	MSM_PIN_FUNCTION(smart3),
+	MSM_PIN_FUNCTION(tm),
+	MSM_PIN_FUNCTION(wifi0),
+	MSM_PIN_FUNCTION(wifi1),
 };
 
 static const struct msm_pingroup ipq4019_groups[] = {
-	PINGROUP(0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(2, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(3, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(4, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(5, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(6, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(7, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(8, blsp_uart1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(9, blsp_uart1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(10, blsp_uart1, NA, NA, blsp_i2c0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(11, blsp_uart1, NA, NA, blsp_i2c0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(12, blsp_spi0, blsp_i2c1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(13, blsp_spi0, blsp_i2c1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(14, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(15, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(16, blsp_uart0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(17, blsp_uart0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(0, jtag, smart0, i2s_rx, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(1, jtag, smart0, i2s_rx, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(2, jtag, smart0, i2s_rx, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(3, jtag, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(4, jtag, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(5, jtag, smart0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(6, mdio, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(7, mdc, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(8, blsp_uart1, NA, NA, smart1, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(9, blsp_uart1, NA, NA, smart1, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(10, blsp_uart1, NA, NA, blsp_i2c0, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(11, blsp_uart1, NA, NA, blsp_i2c0, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(12, blsp_spi0, blsp_i2c1, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(13, blsp_spi0, blsp_i2c1, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(14, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(15, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(16, blsp_uart0, led0, smart1, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(17, blsp_uart0, led1, smart1, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
 	PINGROUP(18, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(19, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(20, blsp_i2c0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(21, blsp_i2c0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(22, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(23, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(24, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(25, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(26, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(27, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(28, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(29, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(30, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(31, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(32, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(33, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(34, blsp_i2c1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(35, blsp_i2c1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(36, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(37, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(38, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(39, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(40, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(41, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(42, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(43, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(44, NA, blsp_spi1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(45, NA, blsp_spi1, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(46, NA, blsp_spi1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(47, NA, blsp_spi1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(48, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(49, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(50, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(51, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(52, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(53, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(54, NA, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(55, NA, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(56, NA, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(57, NA, blsp_spi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(58, NA, NA, blsp_i2c0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(59, NA, blsp_i2c0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(60, NA, blsp_uart0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(61, NA, blsp_uart0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(62, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(63, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(64, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(65, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(66, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(67, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(68, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(69, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(20, blsp_i2c0, i2s_rx, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(21, blsp_i2c0, i2s_rx, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(22, rgmii, i2s_rx, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(23, sdio, rgmii, i2s_rx, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(24, sdio, rgmii, i2s_tx, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(25, sdio, rgmii, i2s_tx, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(26, sdio, rgmii, i2s_tx, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(27, sdio, rgmii, i2s_td, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(28, sdio, rgmii, i2s_td, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(29, sdio, rgmii, i2s_td, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(30, sdio, rgmii, audio_pwm, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(31, sdio, rgmii, audio_pwm, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(32, sdio, rgmii, audio_pwm, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(33, rgmii, audio_pwm, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(34, blsp_i2c1, i2s_spdif_in, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA, NA),
+	PINGROUP(35, blsp_i2c1, i2s_spdif_out, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA, NA),
+	PINGROUP(36, rmii, led2, led0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(37, rmii, wifi0, wifi1, led1, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(38, rmii, led2, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(39, rmii, pcie, led3, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(40, rmii, wifi0, wifi1, smart2, led4, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(41, rmii, wifi0, wifi1, smart2, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(42, rmii, wifi0, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(43, rmii, wifi1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(44, rmii, blsp_spi1, smart0, led5, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(45, rmii, blsp_spi1, blsp_spi0, smart0, led6, NA, NA, NA, NA,
+		 NA, NA, NA, NA, NA),
+	PINGROUP(46, rmii, blsp_spi1, smart0, led7, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(47, rmii, blsp_spi1, smart0, led8, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(48, rmii, aud_pin, smart2, led9, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(49, rmii, aud_pin, smart2, led10, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(50, rmii, aud_pin, wifi0, wifi1, led11, NA, NA, NA, NA, NA,
+		 NA, NA, NA, NA),
+	PINGROUP(51, rmii, aud_pin, wifi0, wifi1, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(52, qpic, mdc, pcie, i2s_tx, NA, NA, NA, tm, wifi0, wifi1, NA,
+		 NA, NA, NA),
+	PINGROUP(53, qpic, mdio, i2s_tx, prng_rosc, NA, tm, wifi0, wifi1, NA,
+		 NA, NA, NA, NA, NA),
+	PINGROUP(54, qpic, blsp_spi0, i2s_td, NA, pmu, NA, NA, NA, tm, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(55, qpic, blsp_spi0, i2s_td, NA, pmu, NA, NA, NA, tm, NA, NA,
+		 NA, NA, NA),
+	PINGROUP(56, qpic, blsp_spi0, i2s_td, NA, NA, tm, wifi0, wifi1, NA, NA,
+		 NA, NA, NA, NA),
+	PINGROUP(57, qpic, blsp_spi0, i2s_tx, NA, NA, tm, wifi0, wifi1, NA, NA,
+		 NA, NA, NA, NA),
+	PINGROUP(58, qpic, led2, blsp_i2c0, smart3, smart1, i2s_rx, NA, NA, tm,
+		 wifi0, wifi1, NA, NA, NA),
+	PINGROUP(59, qpic, blsp_i2c0, smart3, smart1, i2s_spdif_in, NA, NA, NA,
+		 NA, NA, tm, NA, NA, NA),
+	PINGROUP(60, qpic, blsp_uart0, smart1, smart3, led0, i2s_tx, i2s_rx,
+		 NA, NA, NA, NA, NA, tm, NA),
+	PINGROUP(61, qpic, blsp_uart0, smart1, smart3, led1, i2s_tx, i2s_rx,
+		 NA, NA, NA, NA, NA, tm, NA),
+	PINGROUP(62, qpic, chip_rst, NA, NA, i2s_spdif_out, NA, NA, NA, NA, NA,
+		 tm, NA, NA, NA),
+	PINGROUP(63, qpic, NA, NA, NA, i2s_td, i2s_rx, i2s_spdif_out,
+		 i2s_spdif_in, NA, NA, NA, NA, tm, NA),
+	PINGROUP(64, qpic, audio_pwm, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(65, qpic, audio_pwm, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(66, qpic, audio_pwm, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(67, qpic, audio_pwm, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA, NA),
+	PINGROUP(68, qpic, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(69, qpic, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(70, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(71, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(72, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(73, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(74, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(75, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(76, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(77, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(78, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(79, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(80, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(81, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(82, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(83, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(84, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(85, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(86, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(87, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(88, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(89, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(90, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(91, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(92, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(93, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(94, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(95, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(96, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(97, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(98, wifi0, wifi1, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA,
+		 NA),
+	PINGROUP(99, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
 };
 
 static const struct msm_pinctrl_soc_data ipq4019_pinctrl = {
@@ -415,6 +690,7 @@ static const struct msm_pinctrl_soc_data ipq4019_pinctrl = {
 	.groups = ipq4019_groups,
 	.ngroups = ARRAY_SIZE(ipq4019_groups),
 	.ngpios = 100,
+	.pull_no_keeper = true,
 };
 
 static int ipq4019_pinctrl_probe(struct platform_device *pdev)
@@ -426,6 +702,7 @@ static const struct of_device_id ipq4019_pinctrl_of_match[] = {
 	{ .compatible = "qcom,ipq4019-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, ipq4019_pinctrl_of_match);
 
 static struct platform_driver ipq4019_pinctrl_driver = {
 	.driver = {
@@ -433,7 +710,6 @@ static struct platform_driver ipq4019_pinctrl_driver = {
 		.of_match_table = ipq4019_pinctrl_of_match,
 	},
 	.probe = ipq4019_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init ipq4019_pinctrl_init(void)
@@ -450,4 +726,3 @@ module_exit(ipq4019_pinctrl_exit);
 
 MODULE_DESCRIPTION("Qualcomm ipq4019 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, ipq4019_pinctrl_of_match);

@@ -1,11 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2005 - 2016 Broadcom
  * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.  The full GNU General
- * Public License is included in this distribution in the file called COPYING.
  *
  * Contact Information:
  * linux-drivers@emulex.com
@@ -58,7 +54,8 @@ enum mcc_base_status {
 	MCC_STATUS_INSUFFICIENT_BUFFER = 4,
 	MCC_STATUS_UNAUTHORIZED_REQUEST = 5,
 	MCC_STATUS_NOT_SUPPORTED = 66,
-	MCC_STATUS_FEATURE_NOT_SUPPORTED = 68
+	MCC_STATUS_FEATURE_NOT_SUPPORTED = 68,
+	MCC_STATUS_INVALID_LENGTH = 116
 };
 
 /* Additional status */
@@ -200,7 +197,7 @@ enum {
 			 phy_state == BE_PHY_UNQUALIFIED ||	\
 			 phy_state == BE_PHY_UNCERTIFIED)
 
-extern  char *be_misconfig_evt_port_state[];
+extern const  char * const be_misconfig_evt_port_state[];
 
 /* async event indicating misconfigured port */
 struct be_async_event_misconfig_port {
@@ -294,8 +291,8 @@ struct be_mcc_mailbox {
 #define OPCODE_COMMON_GET_PHY_DETAILS			102
 #define OPCODE_COMMON_SET_DRIVER_FUNCTION_CAP		103
 #define OPCODE_COMMON_GET_CNTL_ADDITIONAL_ATTRIBUTES	121
-#define OPCODE_COMMON_GET_EXT_FAT_CAPABILITES		125
-#define OPCODE_COMMON_SET_EXT_FAT_CAPABILITES		126
+#define OPCODE_COMMON_GET_EXT_FAT_CAPABILITIES		125
+#define OPCODE_COMMON_SET_EXT_FAT_CAPABILITIES		126
 #define OPCODE_COMMON_GET_MAC_LIST			147
 #define OPCODE_COMMON_SET_MAC_LIST			148
 #define OPCODE_COMMON_GET_HSW_CONFIG			152
@@ -308,6 +305,7 @@ struct be_mcc_mailbox {
 #define OPCODE_COMMON_READ_OBJECT			171
 #define OPCODE_COMMON_WRITE_OBJECT			172
 #define OPCODE_COMMON_DELETE_OBJECT			174
+#define OPCODE_COMMON_SET_FEATURES			191
 #define OPCODE_COMMON_MANAGE_IFACE_FILTERS		193
 #define OPCODE_COMMON_GET_IFACE_LIST			194
 #define OPCODE_COMMON_ENABLE_DISABLE_VF			196
@@ -1136,14 +1134,14 @@ struct be_cmd_resp_get_fw_version {
 	u8 fw_on_flash_version_string[FW_VER_LEN];
 } __packed;
 
-/******************** Set Flow Contrl *******************/
+/******************** Set Flow Control *******************/
 struct be_cmd_req_set_flow_control {
 	struct be_cmd_req_hdr hdr;
 	u16 tx_flow_control;
 	u16 rx_flow_control;
 } __packed;
 
-/******************** Get Flow Contrl *******************/
+/******************** Get Flow Control *******************/
 struct be_cmd_req_get_flow_control {
 	struct be_cmd_req_hdr hdr;
 	u32 rsvd;
@@ -1417,7 +1415,7 @@ struct flash_section_entry {
 } __packed;
 
 struct flash_section_info {
-	u8 cookie[32];
+	u8 cookie[32] __nonstring;
 	struct flash_section_hdr fsec_hdr;
 	struct flash_section_entry fsec_entry[32];
 } __packed;
@@ -1718,7 +1716,11 @@ struct mgmt_hba_attribs {
 	u32 rsvd2[55];
 	u8 rsvd3[3];
 	u8 phy_port;
-	u32 rsvd4[13];
+	u32 rsvd4[15];
+	u8 rsvd5[2];
+	u8 pci_funcnum;
+	u8 rsvd6;
+	u32 rsvd7[6];
 } __packed;
 
 struct mgmt_controller_attrib {
@@ -2067,7 +2069,7 @@ struct be_cmd_resp_get_stats_v2 {
 	struct be_hw_stats_v2 hw_stats;
 };
 
-/************** get fat capabilites *******************/
+/************** get fat capabilities *******************/
 #define MAX_MODULES 27
 #define MAX_MODES 4
 #define MODE_UART 0
@@ -2315,6 +2317,41 @@ struct be_cmd_resp_get_iface_list {
 	struct be_if_desc if_desc;
 };
 
+/************** Set Features *******************/
+#define	BE_FEATURE_UE_RECOVERY		0x10
+#define	BE_UE_RECOVERY_UER_MASK		0x1
+
+struct be_req_ue_recovery {
+	u32	uer;
+	u32	rsvd;
+};
+
+struct be_cmd_req_set_features {
+	struct be_cmd_req_hdr hdr;
+	u32 features;
+	u32 parameter_len;
+	union {
+		struct be_req_ue_recovery req;
+		u32 rsvd[2];
+	} parameter;
+};
+
+struct be_resp_ue_recovery {
+	u32 uer;
+	u16 ue2rp;
+	u16 ue2sr;
+};
+
+struct be_cmd_resp_set_features {
+	struct be_cmd_resp_hdr hdr;
+	u32 features;
+	u32 parameter_len;
+	union {
+		struct be_resp_ue_recovery resp;
+		u32 rsvd[2];
+	} parameter;
+};
+
 /*************** Set logical link ********************/
 #define PLINK_ENABLE            BIT(0)
 #define PLINK_TRACK             BIT(8)
@@ -2343,11 +2380,11 @@ struct be_cmd_req_manage_iface_filters {
 	u32 cap_control_flags;
 } __packed;
 
-int be_pci_fnum_get(struct be_adapter *adapter);
+u16 be_POST_stage_get(struct be_adapter *adapter);
 int be_fw_wait_ready(struct be_adapter *adapter);
 int be_cmd_mac_addr_query(struct be_adapter *adapter, u8 *mac_addr,
 			  bool permanent, u32 if_handle, u32 pmac_id);
-int be_cmd_pmac_add(struct be_adapter *adapter, u8 *mac_addr, u32 if_id,
+int be_cmd_pmac_add(struct be_adapter *adapter, const u8 *mac_addr, u32 if_id,
 		    u32 *pmac_id, u32 domain);
 int be_cmd_pmac_del(struct be_adapter *adapter, u32 if_id, int pmac_id,
 		    u32 domain);
@@ -2368,7 +2405,6 @@ int be_cmd_q_destroy(struct be_adapter *adapter, struct be_queue_info *q,
 int be_cmd_rxq_destroy(struct be_adapter *adapter, struct be_queue_info *q);
 int be_cmd_link_status_query(struct be_adapter *adapter, u16 *link_speed,
 			     u8 *link_status, u32 dom);
-int be_cmd_reset(struct be_adapter *adapter);
 int be_cmd_get_stats(struct be_adapter *adapter, struct be_dma_mem *nonemb_cmd);
 int lancer_cmd_get_pport_stats(struct be_adapter *adapter,
 			       struct be_dma_mem *nonemb_cmd);
@@ -2389,7 +2425,7 @@ int be_cmd_set_beacon_state(struct be_adapter *adapter, u8 port_num, u8 beacon,
 int be_cmd_get_beacon_state(struct be_adapter *adapter, u8 port_num,
 			    u32 *state);
 int be_cmd_read_port_transceiver_data(struct be_adapter *adapter,
-				      u8 page_num, u8 *data);
+				      u8 page_num, u32 off, u32 len, u8 *data);
 int be_cmd_query_cable_type(struct be_adapter *adapter);
 int be_cmd_query_sfp_info(struct be_adapter *adapter);
 int lancer_cmd_read_object(struct be_adapter *adapter, struct be_dma_mem *cmd,
@@ -2450,7 +2486,6 @@ int lancer_physdev_ctrl(struct be_adapter *adapter, u32 mask);
 int lancer_initiate_dump(struct be_adapter *adapter);
 int lancer_delete_dump(struct be_adapter *adapter);
 bool dump_present(struct be_adapter *adapter);
-int lancer_test_and_set_rdy_state(struct be_adapter *adapter);
 int be_cmd_query_port_name(struct be_adapter *adapter);
 int be_cmd_get_func_config(struct be_adapter *adapter,
 			   struct be_resources *res);
@@ -2470,3 +2505,4 @@ int be_cmd_manage_iface(struct be_adapter *adapter, u32 iface, u8 op);
 int be_cmd_set_sriov_config(struct be_adapter *adapter,
 			    struct be_resources res, u16 num_vfs,
 			    struct be_resources *vft_res);
+int be_cmd_set_features(struct be_adapter *adapter);

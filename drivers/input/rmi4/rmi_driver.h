@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2011-2016 Synaptics Incorporated
  * Copyright (c) 2011 Unixphere
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #ifndef _RMI_DRIVER_H
@@ -15,8 +12,6 @@
 #include <linux/ktime.h>
 #include <linux/input.h>
 #include "rmi_bus.h"
-
-#define RMI_DRIVER_VERSION "2.0"
 
 #define SYNAPTICS_INPUT_DEVICE_NAME "Synaptics RMI4 Touch Sensor"
 #define SYNAPTICS_VENDOR_ID 0x06cb
@@ -51,19 +46,16 @@ struct pdt_entry {
 	u8 function_number;
 };
 
-int rmi_read_pdt_entry(struct rmi_device *rmi_dev, struct pdt_entry *entry,
-			u16 pdt_address);
-
-#define RMI_REG_DESC_PRESENSE_BITS	(32 * BITS_PER_BYTE)
+#define RMI_REG_DESC_PRESENCE_BITS	(32 * BITS_PER_BYTE)
+#define RMI_REG_DESC_PRESENCE_REGS_MAX	(3 + RMI_REG_DESC_PRESENCE_BITS / 8)
 #define RMI_REG_DESC_SUBPACKET_BITS	(37 * BITS_PER_BYTE)
 
 /* describes a single packet register */
 struct rmi_register_desc_item {
+	u32 reg_size;
 	u16 reg;
-	unsigned long reg_size;
-	u8 num_subpackets;
-	unsigned long subpacket_map[BITS_TO_LONGS(
-				RMI_REG_DESC_SUBPACKET_BITS)];
+	u16 num_subpackets;
+	DECLARE_BITMAP(subpacket_map, RMI_REG_DESC_SUBPACKET_BITS);
 };
 
 /*
@@ -72,8 +64,7 @@ struct rmi_register_desc_item {
  */
 struct rmi_register_descriptor {
 	unsigned long struct_size;
-	unsigned long presense_map[BITS_TO_LONGS(RMI_REG_DESC_PRESENSE_BITS)];
-	u8 num_registers;
+	u16 num_registers;
 	struct rmi_register_desc_item *registers;
 };
 
@@ -92,14 +83,60 @@ int rmi_register_desc_calc_reg_offset(
 bool rmi_register_desc_has_subpacket(const struct rmi_register_desc_item *item,
 			u8 subpacket);
 
-bool rmi_is_physical_driver(struct device_driver *);
+bool rmi_is_physical_driver(const struct device_driver *);
 int rmi_register_physical_driver(void);
 void rmi_unregister_physical_driver(void);
+void rmi_free_function_list(struct rmi_device *rmi_dev);
+struct rmi_function *rmi_find_function(struct rmi_device *rmi_dev, u8 number);
+int rmi_enable_sensor(struct rmi_device *rmi_dev);
+int rmi_scan_pdt(struct rmi_device *rmi_dev, void *ctx,
+		 int (*callback)(struct rmi_device *rmi_dev, void *ctx,
+		 const struct pdt_entry *entry));
+int rmi_probe_interrupts(struct rmi_driver_data *data);
+void rmi_enable_irq(struct rmi_device *rmi_dev, bool clear_wake);
+void rmi_disable_irq(struct rmi_device *rmi_dev, bool enable_wake);
+int rmi_init_functions(struct rmi_driver_data *data);
+int rmi_initial_reset(struct rmi_device *rmi_dev, void *ctx,
+		      const struct pdt_entry *pdt);
 
-char *rmi_f01_get_product_ID(struct rmi_function *fn);
+const char *rmi_f01_get_product_ID(struct rmi_function *fn);
+
+#ifdef CONFIG_RMI4_F03
+int rmi_f03_overwrite_button(struct rmi_function *fn, unsigned int button,
+			     int value);
+void rmi_f03_commit_buttons(struct rmi_function *fn);
+#else
+static inline int rmi_f03_overwrite_button(struct rmi_function *fn,
+					   unsigned int button, int value)
+{
+	return 0;
+}
+static inline void rmi_f03_commit_buttons(struct rmi_function *fn) {}
+#endif
+
+#ifdef CONFIG_RMI4_F34
+int rmi_f34_create_sysfs(struct rmi_device *rmi_dev);
+void rmi_f34_remove_sysfs(struct rmi_device *rmi_dev);
+#else
+static inline int rmi_f34_create_sysfs(struct rmi_device *rmi_dev)
+{
+	return 0;
+}
+
+static inline void rmi_f34_remove_sysfs(struct rmi_device *rmi_dev)
+{
+}
+#endif /* CONFIG_RMI_F34 */
 
 extern struct rmi_function_handler rmi_f01_handler;
+extern struct rmi_function_handler rmi_f03_handler;
 extern struct rmi_function_handler rmi_f11_handler;
 extern struct rmi_function_handler rmi_f12_handler;
+extern struct rmi_function_handler rmi_f1a_handler;
+extern struct rmi_function_handler rmi_f21_handler;
 extern struct rmi_function_handler rmi_f30_handler;
+extern struct rmi_function_handler rmi_f34_handler;
+extern struct rmi_function_handler rmi_f3a_handler;
+extern struct rmi_function_handler rmi_f54_handler;
+extern struct rmi_function_handler rmi_f55_handler;
 #endif

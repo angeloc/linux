@@ -1,14 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Maxim MAX197 A/D Converter driver
  *
  * Copyright (c) 2012 Savoir-faire Linux Inc.
  *          Vivien Didelot <vivien.didelot@savoirfairelinux.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * For further information, see the Documentation/hwmon/max197 file.
+ * For further information, see the Documentation/hwmon/max197.rst file.
  */
 
 #include <linux/kernel.h>
@@ -207,8 +204,8 @@ unlock:
 	return ret;
 }
 
-static ssize_t max197_show_name(struct device *dev,
-				struct device_attribute *attr, char *buf)
+static ssize_t name_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	return sprintf(buf, "%s\n", pdev->name);
@@ -231,7 +228,7 @@ static ssize_t max197_show_name(struct device *dev,
 	&sensor_dev_attr_in##chan##_max.dev_attr.attr,			\
 	&sensor_dev_attr_in##chan##_min.dev_attr.attr
 
-static DEVICE_ATTR(name, S_IRUGO, max197_show_name, NULL);
+static DEVICE_ATTR_RO(name);
 
 MAX197_SENSOR_DEVICE_ATTR_CH(0);
 MAX197_SENSOR_DEVICE_ATTR_CH(1);
@@ -314,19 +311,17 @@ error:
 	return ret;
 }
 
-static int max197_remove(struct platform_device *pdev)
+static void max197_remove(struct platform_device *pdev)
 {
 	struct max197_data *data = platform_get_drvdata(pdev);
 
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&pdev->dev.kobj, &max197_sysfs_group);
-
-	return 0;
 }
 
 static const struct platform_device_id max197_device_ids[] = {
-	{ "max197", max197 },
-	{ "max199", max199 },
+	{ .name = "max197", .driver_data = max197 },
+	{ .name = "max199", .driver_data = max199 },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, max197_device_ids);

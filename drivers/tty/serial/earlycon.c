@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2014 Linaro Ltd.
  * Author: Rob Herring <robh@kernel.org>
@@ -5,15 +6,12 @@
  * Based on 8250 earlycon:
  * (c) Copyright 2004 Hewlett-Packard Development Company, L.P.
  *	Bjorn Helgaas <bjorn.helgaas@hp.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 
 #include <linux/console.h>
+#include <linux/ctype.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -21,6 +19,7 @@
 #include <linux/sizes.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
+#include <linux/acpi.h>
 
 #ifdef CONFIG_FIX_EARLYCON_MEM
 #include <asm/fixmap.h>
@@ -38,7 +37,7 @@ static struct earlycon_device early_console_dev = {
 	.con = &early_con,
 };
 
-static void __iomem * __init earlycon_map(unsigned long paddr, size_t size)
+static void __iomem * __init earlycon_map(resource_size_t paddr, size_t size)
 {
 	void __iomem *base;
 #ifdef CONFIG_FIX_EARLYCON_MEM
@@ -49,8 +48,7 @@ static void __iomem * __init earlycon_map(unsigned long paddr, size_t size)
 	base = ioremap(paddr, size);
 #endif
 	if (!base)
-		pr_err("%s: Couldn't map 0x%llx\n", __func__,
-		       (unsigned long long)paddr);
+		pr_err("%s: Couldn't map %pa\n", __func__, &paddr);
 
 	return base;
 }
@@ -59,40 +57,37 @@ static void __init earlycon_init(struct earlycon_device *device,
 				 const char *name)
 {
 	struct console *earlycon = device->con;
-	struct uart_port *port = &device->port;
 	const char *s;
 	size_t len;
 
-	/* scan backwards from end of string for first non-numeral */
-	for (s = name + strlen(name);
-	     s > name && s[-1] >= '0' && s[-1] <= '9';
-	     s--)
-		;
+	/* Scan backwards to split the trailing index from the console name. */
+	s = name + strlen(name);
+	while (s > name && isdigit(s[-1]))
+		s--;
 	if (*s)
 		earlycon->index = simple_strtoul(s, NULL, 10);
 	len = s - name;
-	strlcpy(earlycon->name, name, min(len + 1, sizeof(earlycon->name)));
+	strscpy(earlycon->name, name, min(len + 1, sizeof(earlycon->name)));
 	earlycon->data = &early_console_dev;
+}
 
-	if (port->iotype == UPIO_MEM || port->iotype == UPIO_MEM16 ||
-	    port->iotype == UPIO_MEM32 || port->iotype == UPIO_MEM32BE)
-		pr_info("%s%d at MMIO%s %pa (options '%s')\n",
-			earlycon->name, earlycon->index,
-			(port->iotype == UPIO_MEM) ? "" :
-			(port->iotype == UPIO_MEM16) ? "16" :
-			(port->iotype == UPIO_MEM32) ? "32" : "32be",
-			&port->mapbase, device->options);
-	else
-		pr_info("%s%d at I/O port 0x%lx (options '%s')\n",
-			earlycon->name, earlycon->index,
-			port->iobase, device->options);
+static void __init earlycon_print_info(struct earlycon_device *device)
+{
+	struct console *earlycon = device->con;
+	struct uart_port *port = &device->port;
+	char ioinfos[64];
+
+	uart_get_ioinfos(port, ioinfos, sizeof(ioinfos));
+
+	pr_info("%s%d%s (options '%s')\n", earlycon->name, earlycon->index,
+		ioinfos, device->options);
 }
 
 static int __init parse_options(struct earlycon_device *device, char *options)
 {
 	struct uart_port *port = &device->port;
 	int length;
-	unsigned long addr;
+	resource_size_t addr;
 
 	if (uart_parse_earlycon(options, &port->iotype, &addr, &options))
 		return -EINVAL;
@@ -118,10 +113,16 @@ static int __init parse_options(struct earlycon_device *device, char *options)
 	}
 
 	if (options) {
+		char *uartclk;
+
 		device->baud = simple_strtoul(options, NULL, 0);
+		uartclk = strchr(options, ',');
+		if (uartclk && kstrtouint(uartclk + 1, 0, &port->uartclk) < 0)
+			pr_warn("[%s] unsupported earlycon uart clkrate option\n",
+				options);
 		length = min(strcspn(options, " ") + 1,
 			     (size_t)(sizeof(device->options)));
-		strlcpy(device->options, options, length);
+		strscpy(device->options, options, length);
 	}
 
 	return 0;
@@ -137,12 +138,14 @@ static int __init register_earlycon(char *buf, const struct earlycon_id *match)
 		buf = NULL;
 
 	spin_lock_init(&port->lock);
-	port->uartclk = BASE_BAUD * 16;
+	if (!port->uartclk)
+		port->uartclk = BASE_BAUD * 16;
 	if (port->mapbase)
 		port->membase = earlycon_map(port->mapbase, 64);
 
 	earlycon_init(&early_console_dev, match->name);
 	err = match->setup(&early_console_dev, buf);
+	earlycon_print_info(&early_console_dev);
 	if (err < 0)
 		return err;
 	if (!early_console_dev.con->write)
@@ -173,17 +176,23 @@ static int __init register_earlycon(char *buf, const struct earlycon_id *match)
 int __init setup_earlycon(char *buf)
 {
 	const struct earlycon_id *match;
+	bool empty_compatible = true;
 
 	if (!buf || !buf[0])
 		return -EINVAL;
 
-	if (early_con.flags & CON_ENABLED)
+	if (console_is_registered(&early_con))
 		return -EALREADY;
 
+again:
 	for (match = __earlycon_table; match < __earlycon_table_end; match++) {
 		size_t len = strlen(match->name);
 
 		if (strncmp(buf, match->name, len))
+			continue;
+
+		/* prefer entries with empty compatible */
+		if (empty_compatible && *match->compatible)
 			continue;
 
 		if (buf[len]) {
@@ -196,20 +205,34 @@ int __init setup_earlycon(char *buf)
 		return register_earlycon(buf, match);
 	}
 
+	if (empty_compatible) {
+		empty_compatible = false;
+		goto again;
+	}
+
 	return -ENOENT;
 }
+
+/*
+ * This defers the initialization of the early console until after ACPI has
+ * been initialized.
+ */
+bool earlycon_acpi_spcr_enable __initdata;
 
 /* early_param wrapper for setup_earlycon() */
 static int __init param_setup_earlycon(char *buf)
 {
 	int err;
 
-	/*
-	 * Just 'earlycon' is a valid param for devicetree earlycons;
-	 * don't generate a warning from parse_early_params() in that case
-	 */
-	if (!buf || !buf[0])
-		return 0;
+	/* Just 'earlycon' is a valid param for devicetree and ACPI SPCR. */
+	if (!buf || !buf[0]) {
+		if (IS_ENABLED(CONFIG_ACPI_SPCR_TABLE)) {
+			earlycon_acpi_spcr_enable = true;
+			return 0;
+		} else if (!buf) {
+			return early_init_dt_scan_chosen_stdout();
+		}
+	}
 
 	err = setup_earlycon(buf);
 	if (err == -ENOENT || err == -EALREADY)
@@ -217,6 +240,29 @@ static int __init param_setup_earlycon(char *buf)
 	return err;
 }
 early_param("earlycon", param_setup_earlycon);
+
+/*
+ * The `console` parameter is overloaded. It's handled here as an early param
+ * and in `printk.c` as a late param. It's possible to specify an early
+ * `bootconsole` using `earlycon=uartXXXX` (handled above), or via
+ * the `console=uartXXX` alias. See the comment in `8250_early.c`.
+ */
+static int __init param_setup_earlycon_console_alias(char *buf)
+{
+	/*
+	 * A plain `console` parameter must not enable the SPCR `bootconsole`
+	 * like a plain `earlycon` does.
+	 *
+	 * A `console=` parameter that specifies an empty value is used to
+	 * disable the `console`, not the `earlycon` `bootconsole`. The
+	 * disabling of the `console` is handled by `printk.c`.
+	 */
+	if (!buf || !buf[0])
+		return 0;
+
+	return param_setup_earlycon(buf);
+}
+early_param("console", param_setup_earlycon_console_alias);
 
 #ifdef CONFIG_OF_EARLY_FLATTREE
 
@@ -230,6 +276,9 @@ int __init of_setup_earlycon(const struct earlycon_id *match,
 	bool big_endian;
 	u64 addr;
 
+	if (console_is_registered(&early_con))
+		return -EALREADY;
+
 	spin_lock_init(&port->lock);
 	port->iotype = UPIO_MEM;
 	addr = of_flat_dt_translate_address(node);
@@ -238,12 +287,12 @@ int __init of_setup_earlycon(const struct earlycon_id *match,
 		return -ENXIO;
 	}
 	port->mapbase = addr;
-	port->uartclk = BASE_BAUD * 16;
-	port->membase = earlycon_map(port->mapbase, SZ_4K);
 
 	val = of_get_flat_dt_prop(node, "reg-offset", NULL);
 	if (val)
 		port->mapbase += be32_to_cpu(*val);
+	port->membase = earlycon_map(port->mapbase, SZ_4K);
+
 	val = of_get_flat_dt_prop(node, "reg-shift", NULL);
 	if (val)
 		port->regshift = be32_to_cpu(*val);
@@ -268,12 +317,22 @@ int __init of_setup_earlycon(const struct earlycon_id *match,
 		}
 	}
 
+	val = of_get_flat_dt_prop(node, "current-speed", NULL);
+	if (val)
+		early_console_dev.baud = be32_to_cpu(*val);
+
+	val = of_get_flat_dt_prop(node, "clock-frequency", NULL);
+	if (val)
+		port->uartclk = be32_to_cpu(*val);
+
 	if (options) {
-		strlcpy(early_console_dev.options, options,
+		early_console_dev.baud = simple_strtoul(options, NULL, 0);
+		strscpy(early_console_dev.options, options,
 			sizeof(early_console_dev.options));
 	}
 	earlycon_init(&early_console_dev, match->name);
 	err = match->setup(&early_console_dev, options);
+	earlycon_print_info(&early_console_dev);
 	if (err < 0)
 		return err;
 	if (!early_console_dev.con->write)

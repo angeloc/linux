@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * jitdump.h: jitted code info encapsulation file format
  *
@@ -10,15 +11,15 @@
 #ifndef JITDUMP_H
 #define JITDUMP_H
 
-#include <sys/time.h>
-#include <time.h>
 #include <stdint.h>
+#include <string.h>
 
 /* JiTD */
 #define JITHEADER_MAGIC		0x4A695444
 #define JITHEADER_MAGIC_SW	0x4454694A
 
 #define PADDING_8ALIGNED(x) ((((x) + 7) & 7) ^ 7)
+#define ALIGN_8(x) (((x) + 7) & (~7))
 
 #define JITHEADER_VERSION 1
 
@@ -48,6 +49,7 @@ enum jit_record_type {
         JIT_CODE_MOVE           = 1,
 	JIT_CODE_DEBUG_INFO	= 2,
 	JIT_CODE_CLOSE		= 3,
+	JIT_CODE_UNWINDING_INFO	= 4,
 
 	JIT_CODE_MAX,
 };
@@ -90,7 +92,7 @@ struct debug_entry {
 	uint64_t addr;
 	int lineno;	    /* source line number starting at 1 */
 	int discrim;	    /* column discriminator, 0 is default */
-	const char name[0]; /* null terminated filename, \xff\0 if same as previous entry */
+	const char name[]; /* null terminated filename, \xff\0 if same as previous entry */
 };
 
 struct jr_code_debug_info {
@@ -98,7 +100,16 @@ struct jr_code_debug_info {
 
 	uint64_t code_addr;
 	uint64_t nr_entry;
-	struct debug_entry entries[0];
+	struct debug_entry entries[];
+};
+
+struct jr_code_unwinding_info {
+	struct jr_prefix p;
+
+	uint64_t unwinding_size;
+	uint64_t eh_frame_hdr_size;
+	uint64_t mapped_size;
+	const char unwinding_data[];
 };
 
 union jr_entry {
@@ -107,6 +118,7 @@ union jr_entry {
         struct jr_code_load load;
         struct jr_code_move move;
         struct jr_prefix prefix;
+        struct jr_code_unwinding_info unwinding;
 };
 
 static inline struct debug_entry *

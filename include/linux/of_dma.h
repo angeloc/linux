@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * OF helpers for DMA request / controller
  *
  * Based on of_gpio.h
  *
  * Copyright (C) 2012 Texas Instruments Incorporated - http://www.ti.com/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __LINUX_OF_DMA_H
@@ -41,6 +38,26 @@ extern int of_dma_controller_register(struct device_node *np,
 		void *data);
 extern void of_dma_controller_free(struct device_node *np);
 
+static void __of_dma_controller_free(void *np)
+{
+	of_dma_controller_free(np);
+}
+
+static inline int
+devm_of_dma_controller_register(struct device *dev, struct device_node *np,
+				struct dma_chan *(*of_dma_xlate)
+				(struct of_phandle_args *, struct of_dma *),
+				void *data)
+{
+	int ret;
+
+	ret = of_dma_controller_register(np, of_dma_xlate, data);
+	if (ret)
+		return ret;
+
+	return devm_add_action_or_reset(dev, __of_dma_controller_free, np);
+}
+
 extern int of_dma_router_register(struct device_node *np,
 		void *(*of_dma_route_allocate)
 		(struct of_phandle_args *, struct of_dma *),
@@ -65,6 +82,15 @@ static inline int of_dma_controller_register(struct device_node *np,
 
 static inline void of_dma_controller_free(struct device_node *np)
 {
+}
+
+static inline int
+devm_of_dma_controller_register(struct device *dev, struct device_node *np,
+				struct dma_chan *(*of_dma_xlate)
+				(struct of_phandle_args *, struct of_dma *),
+				void *data)
+{
+	return -ENODEV;
 }
 
 static inline int of_dma_router_register(struct device_node *np,

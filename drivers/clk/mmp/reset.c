@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/slab.h>
 #include <linux/io.h>
 #include <linux/of.h>
@@ -84,7 +85,7 @@ void mmp_clk_reset_register(struct device_node *np,
 {
 	struct mmp_clk_reset_unit *unit;
 
-	unit = kzalloc(sizeof(*unit), GFP_KERNEL);
+	unit = kzalloc_obj(*unit);
 	if (!unit)
 		return;
 

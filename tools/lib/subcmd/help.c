@@ -1,12 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/string.h>
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <assert.h>
 #include "subcmd-util.h"
 #include "help.h"
 #include "exec-cmd.h"
@@ -14,6 +17,8 @@
 void add_cmdname(struct cmdnames *cmds, const char *name, size_t len)
 {
 	struct cmdname *ent = malloc(sizeof(*ent) + len + 1);
+	if (!ent)
+		return;
 
 	ent->len = len;
 	memcpy(ent->name, name, len);
@@ -48,11 +53,21 @@ void uniq(struct cmdnames *cmds)
 	if (!cmds->cnt)
 		return;
 
-	for (i = j = 1; i < cmds->cnt; i++)
-		if (strcmp(cmds->names[i]->name, cmds->names[i-1]->name))
-			cmds->names[j++] = cmds->names[i];
-
+	for (i = 1; i < cmds->cnt; i++) {
+		if (!strcmp(cmds->names[i]->name, cmds->names[i-1]->name))
+			zfree(&cmds->names[i - 1]);
+	}
+	for (i = 0, j = 0; i < cmds->cnt; i++) {
+		if (cmds->names[i]) {
+			if (i == j)
+				j++;
+			else
+				cmds->names[j++] = cmds->names[i];
+		}
+	}
 	cmds->cnt = j;
+	while (j < i)
+		cmds->names[j++] = NULL;
 }
 
 void exclude_cmds(struct cmdnames *cmds, struct cmdnames *excludes)
@@ -60,20 +75,38 @@ void exclude_cmds(struct cmdnames *cmds, struct cmdnames *excludes)
 	size_t ci, cj, ei;
 	int cmp;
 
+	if (!excludes->cnt)
+		return;
+
 	ci = cj = ei = 0;
 	while (ci < cmds->cnt && ei < excludes->cnt) {
 		cmp = strcmp(cmds->names[ci]->name, excludes->names[ei]->name);
-		if (cmp < 0)
-			cmds->names[cj++] = cmds->names[ci++];
-		else if (cmp == 0)
-			ci++, ei++;
-		else if (cmp > 0)
+		if (cmp < 0) {
+			if (ci == cj) {
+				ci++;
+				cj++;
+			} else {
+				cmds->names[cj++] = cmds->names[ci];
+				cmds->names[ci++] = NULL;
+			}
+		} else if (cmp == 0) {
+			zfree(&cmds->names[ci]);
+			ci++;
 			ei++;
+		} else if (cmp > 0) {
+			ei++;
+		}
 	}
-
-	while (ci < cmds->cnt)
-		cmds->names[cj++] = cmds->names[ci++];
-
+	while (ci < cmds->cnt) {
+		if (ci != cj) {
+			cmds->names[cj] = cmds->names[ci];
+			cmds->names[ci] = NULL;
+		}
+		ci++;
+		cj++;
+	}
+	for (ci = cj; ci < cmds->cnt; ci++)
+		assert(cmds->names[ci] == NULL);
 	cmds->cnt = cj;
 }
 
@@ -170,7 +203,7 @@ static void list_commands_in_dir(struct cmdnames *cmds,
 	while ((de = readdir(dir)) != NULL) {
 		int entlen;
 
-		if (prefixcmp(de->d_name, prefix))
+		if (!strstarts(de->d_name, prefix))
 			continue;
 
 		astrcat(&buf, de->d_name);

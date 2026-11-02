@@ -18,9 +18,8 @@
 #include <linux/pci.h>
 #include <linux/pci_ids.h>
 #include <linux/edac.h>
-#include "edac_core.h"
+#include "edac_module.h"
 
-#define I82875P_REVISION	" Ver: 2.0.2"
 #define EDAC_MOD_STR		"i82875p_edac"
 
 #define i82875p_printk(level, fmt, arg...) \
@@ -263,7 +262,6 @@ static void i82875p_check(struct mem_ctl_info *mci)
 {
 	struct i82875p_error_info info;
 
-	edac_dbg(1, "MC%d\n", mci->mc_idx);
 	i82875p_get_error_info(mci, &info);
 	i82875p_process_error_info(mci, &info, 1);
 }
@@ -278,7 +276,7 @@ static int i82875p_setup_overfl_dev(struct pci_dev *pdev,
 
 	*ovrfl_pdev = NULL;
 	*ovrfl_window = NULL;
-	dev = pci_get_device(PCI_VEND_DEV(INTEL, 82875_6), NULL);
+	dev = pci_get_device(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82875_6, NULL);
 
 	if (dev == NULL) {
 		/* Intel tells BIOS developers to hide device 6 which
@@ -423,7 +421,6 @@ static int i82875p_probe1(struct pci_dev *pdev, int dev_idx)
 	mci->edac_ctl_cap = EDAC_FLAG_NONE | EDAC_FLAG_SECDED;
 	mci->edac_cap = EDAC_FLAG_UNKNOWN;
 	mci->mod_name = EDAC_MOD_STR;
-	mci->mod_ver = I82875P_REVISION;
 	mci->ctl_name = i82875p_devs[dev_idx].ctl_name;
 	mci->dev_name = pci_name(pdev);
 	mci->edac_check = i82875p_check;
@@ -521,11 +518,11 @@ static void i82875p_remove_one(struct pci_dev *pdev)
 
 static const struct pci_device_id i82875p_pci_tbl[] = {
 	{
-	 PCI_VEND_DEV(INTEL, 82875_0), PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-	 I82875P},
-	{
-	 0,
-	 }			/* 0 terminated list. */
+		PCI_VEND_DEV(INTEL, 82875_0),
+		.driver_data = I82875P,
+	}, {
+		/* 0 terminated list. */
+	}
 };
 
 MODULE_DEVICE_TABLE(pci, i82875p_pci_tbl);

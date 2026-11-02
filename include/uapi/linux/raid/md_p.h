@@ -1,15 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note */
 /*
    md_p.h : physical layout of Linux RAID devices
           Copyright (C) 1996-98 Ingo Molnar, Gadi Oxman
-	  
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 2, or (at your option)
    any later version.
-   
-   You should have received a copy of the GNU General Public License
-   (for example /usr/src/linux/COPYING); if not, write to the Free
-   Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.  
 */
 
 #ifndef _MD_P_H
@@ -84,6 +81,10 @@
 #define MD_DISK_CANDIDATE	5 /* disk is added as spare (local) until confirmed
 				   * For clustered enviroments only.
 				   */
+#define MD_DISK_FAILFAST	10 /* Send REQ_FAILFAST if there are multiple
+				    * devices available - and don't try to
+				    * correct read errors.
+				    */
 
 #define	MD_DISK_WRITEMOSTLY	9 /* disk is "write-mostly" is RAID1 config.
 				   * read requests will only be sent here in
@@ -118,7 +119,7 @@ typedef struct mdp_device_descriptor_s {
 
 /*
  * Notes:
- * - if an array is being reshaped (restriped) in order to change the
+ * - if an array is being reshaped (restriped) in order to change
  *   the number of active devices in the array, 'raid_disks' will be
  *   the larger of the old and new numbers.  'delta_disks' will
  *   be the "new - old".  So if +ve, raid_disks is the new value, and
@@ -172,7 +173,7 @@ typedef struct mdp_superblock_s {
 #else
 #error unspecified endianness
 #endif
-	__u32 recovery_cp;	/* 11 recovery checkpoint sector count	      */
+	__u32 recovery_cp;	/* 11 resync checkpoint sector count	      */
 	/* There are only valid for minor_version > 90 */
 	__u64 reshape_position;	/* 12,13 next address in array-space for reshape */
 	__u32 new_level;	/* 14 new level we are reshaping to	      */
@@ -232,16 +233,24 @@ struct mdp_superblock_1 {
 	char	set_name[32];	/* set and interpreted by user-space */
 
 	__le64	ctime;		/* lo 40 bits are seconds, top 24 are microseconds or 0*/
-	__le32	level;		/* -4 (multipath), -1 (linear), 0,1,4,5 */
+	__le32	level;		/* 0,1,4,5, -1 (linear) */
 	__le32	layout;		/* only for raid5 and raid10 currently */
 	__le64	size;		/* used size of component devices, in 512byte sectors */
 
 	__le32	chunksize;	/* in 512byte sectors */
 	__le32	raid_disks;
-	__le32	bitmap_offset;	/* sectors after start of superblock that bitmap starts
-				 * NOTE: signed, so bitmap can be before superblock
-				 * only meaningful of feature_map[0] is set.
-				 */
+	union {
+		__le32	bitmap_offset;	/* sectors after start of superblock that bitmap starts
+					 * NOTE: signed, so bitmap can be before superblock
+					 * only meaningful of feature_map[0] is set.
+					 */
+
+		/* only meaningful when feature_map[MD_FEATURE_PPL] is set */
+		struct {
+			__le16 offset; /* sectors from start of superblock that ppl starts (signed) */
+			__le16 size; /* ppl size in sectors */
+		} ppl;
+	};
 
 	/* These are only valid with feature bit '4' */
 	__le32	new_level;	/* new level we are reshaping to		*/
@@ -265,8 +274,9 @@ struct mdp_superblock_1 {
 	__le32	dev_number;	/* permanent identifier of this  device - not role in raid */
 	__le32	cnt_corrected_read; /* number of read errors that were corrected by re-writing */
 	__u8	device_uuid[16]; /* user-space setable, ignored by kernel */
-	__u8	devflags;	/* per-device flags.  Only one defined...*/
+	__u8	devflags;	/* per-device flags.  Only two defined...*/
 #define	WriteMostly1	1	/* mask for writemostly flag in above */
+#define	FailFast1	2	/* Should avoid retries and fixups and just fail */
 	/* Bad block log.  If there are any bad blocks the feature flag is set.
 	 * If offset and size are non-zero, that space is reserved and available
 	 */
@@ -281,7 +291,8 @@ struct mdp_superblock_1 {
 	__le64	resync_offset;	/* data before this offset (from data_offset) known to be in sync */
 	__le32	sb_csum;	/* checksum up to devs[max_dev] */
 	__le32	max_dev;	/* size of devs[] array to consider */
-	__u8	pad3[64-32];	/* set to 0 when writing */
+	__le32  logical_block_size;	/* same as q->limits->logical_block_size */
+	__u8	pad3[64-36];	/* set to 0 when writing */
 
 	/* device state information. Indexed by dev_number.
 	 * 2 bytes per device
@@ -289,7 +300,7 @@ struct mdp_superblock_1 {
 	 * into the 'roles' value.  If a device is spare or faulty, then it doesn't
 	 * have a meaningful role.
 	 */
-	__le16	dev_roles[0];	/* role in array, or 0xffff for a spare, or 0xfffe for faulty */
+	__le16	dev_roles[];	/* role in array, or 0xffff for a spare, or 0xfffe for faulty */
 };
 
 /* feature_map bits */
@@ -311,8 +322,11 @@ struct mdp_superblock_1 {
 #define	MD_FEATURE_RECOVERY_BITMAP	128 /* recovery that is happening
 					     * is guided by bitmap.
 					     */
-#define MD_FEATURE_CLUSTERED		256 /* clustered MD */
+#define	MD_FEATURE_CLUSTERED		256 /* clustered MD */
 #define	MD_FEATURE_JOURNAL		512 /* support write cache */
+#define	MD_FEATURE_PPL			1024 /* support PPL */
+#define	MD_FEATURE_MULTIPLE_PPLS	2048 /* support for multiple PPLs */
+#define	MD_FEATURE_RAID0_LAYOUT		4096 /* layout is meaningful for RAID0 */
 #define	MD_FEATURE_ALL			(MD_FEATURE_BITMAP_OFFSET	\
 					|MD_FEATURE_RECOVERY_OFFSET	\
 					|MD_FEATURE_RESHAPE_ACTIVE	\
@@ -323,6 +337,9 @@ struct mdp_superblock_1 {
 					|MD_FEATURE_RECOVERY_BITMAP	\
 					|MD_FEATURE_CLUSTERED		\
 					|MD_FEATURE_JOURNAL		\
+					|MD_FEATURE_PPL			\
+					|MD_FEATURE_MULTIPLE_PPLS	\
+					|MD_FEATURE_RAID0_LAYOUT	\
 					)
 
 struct r5l_payload_header {
@@ -383,4 +400,31 @@ struct r5l_meta_block {
 
 #define R5LOG_VERSION 0x1
 #define R5LOG_MAGIC 0x6433c509
+
+struct ppl_header_entry {
+	__le64 data_sector;	/* raid sector of the new data */
+	__le32 pp_size;		/* length of partial parity */
+	__le32 data_size;	/* length of data */
+	__le32 parity_disk;	/* member disk containing parity */
+	__le32 checksum;	/* checksum of partial parity data for this
+				 * entry (~crc32c) */
+} __attribute__ ((__packed__));
+
+#define PPL_HEADER_SIZE 4096
+#define PPL_HDR_RESERVED 512
+#define PPL_HDR_ENTRY_SPACE \
+	(PPL_HEADER_SIZE - PPL_HDR_RESERVED - 4 * sizeof(__le32) - sizeof(__le64))
+#define PPL_HDR_MAX_ENTRIES \
+	(PPL_HDR_ENTRY_SPACE / sizeof(struct ppl_header_entry))
+
+struct ppl_header {
+	__u8 reserved[PPL_HDR_RESERVED];/* reserved space, fill with 0xff */
+	__le32 signature;		/* signature (family number of volume) */
+	__le32 padding;			/* zero pad */
+	__le64 generation;		/* generation number of the header */
+	__le32 entries_count;		/* number of entries in entry array */
+	__le32 checksum;		/* checksum of the header (~crc32c) */
+	struct ppl_header_entry entries[PPL_HDR_MAX_ENTRIES];
+} __attribute__ ((__packed__));
+
 #endif

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Copyright (C) 2010 Tobias Klauser <tklauser@distanz.ch>
  * Copyright (C) 2004 Microtronix Datacom Ltd
@@ -12,7 +13,7 @@
 #ifndef _UAPI_ASM_NIOS2_PTRACE_H
 #define _UAPI_ASM_NIOS2_PTRACE_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/types.h>
 
@@ -79,5 +80,5 @@ struct user_pt_regs {
 	__u32		regs[49];
 };
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* _UAPI_ASM_NIOS2_PTRACE_H */

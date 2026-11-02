@@ -1,14 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Amlogic Meson DWMAC glue layer
+ * Amlogic Meson6 and Meson8 DWMAC glue layer
  *
  * Copyright (C) 2014 Beniamino Galvani <b.galvani@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/device.h>
@@ -28,9 +22,10 @@ struct meson_dwmac {
 	void __iomem	*reg;
 };
 
-static void meson6_dwmac_fix_mac_speed(void *priv, unsigned int speed)
+static int meson6_dwmac_set_clk_tx_rate(void *bsp_priv, struct clk *clk_tx_i,
+					phy_interface_t interface, int speed)
 {
-	struct meson_dwmac *dwmac = priv;
+	struct meson_dwmac *dwmac = bsp_priv;
 	unsigned int val;
 
 	val = readl(dwmac->reg);
@@ -45,6 +40,8 @@ static void meson6_dwmac_fix_mac_speed(void *priv, unsigned int speed)
 	}
 
 	writel(val, dwmac->reg);
+
+	return 0;
 }
 
 static int meson6_dwmac_probe(struct platform_device *pdev)
@@ -52,14 +49,13 @@ static int meson6_dwmac_probe(struct platform_device *pdev)
 	struct plat_stmmacenet_data *plat_dat;
 	struct stmmac_resources stmmac_res;
 	struct meson_dwmac *dwmac;
-	struct resource *res;
 	int ret;
 
 	ret = stmmac_get_platform_resources(pdev, &stmmac_res);
 	if (ret)
 		return ret;
 
-	plat_dat = stmmac_probe_config_dt(pdev, &stmmac_res.mac);
+	plat_dat = devm_stmmac_probe_config_dt(pdev, stmmac_res.mac);
 	if (IS_ERR(plat_dat))
 		return PTR_ERR(plat_dat);
 
@@ -67,13 +63,12 @@ static int meson6_dwmac_probe(struct platform_device *pdev)
 	if (!dwmac)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	dwmac->reg = devm_ioremap_resource(&pdev->dev, res);
+	dwmac->reg = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(dwmac->reg))
 		return PTR_ERR(dwmac->reg);
 
 	plat_dat->bsp_priv = dwmac;
-	plat_dat->fix_mac_speed = meson6_dwmac_fix_mac_speed;
+	plat_dat->set_clk_tx_rate = meson6_dwmac_set_clk_tx_rate;
 
 	return stmmac_dvr_probe(&pdev->dev, plat_dat, &stmmac_res);
 }
@@ -96,5 +91,5 @@ static struct platform_driver meson6_dwmac_driver = {
 module_platform_driver(meson6_dwmac_driver);
 
 MODULE_AUTHOR("Beniamino Galvani <b.galvani@gmail.com>");
-MODULE_DESCRIPTION("Amlogic Meson DWMAC glue layer");
+MODULE_DESCRIPTION("Amlogic Meson6 and Meson8 DWMAC glue layer");
 MODULE_LICENSE("GPL v2");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SCTP kernel implementation
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
@@ -10,22 +11,6 @@
  * An SCTP inqueue is a queue into which you push SCTP packets
  * (which might be bundles or fragments of chunks) and out of which you
  * pop SCTP whole chunks.
- *
- * This SCTP implementation is free software;
- * you can redistribute it and/or modify it under the terms of
- * the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This SCTP implementation is distributed in the hope that it
- * will be useful, but WITHOUT ANY WARRANTY; without even the implied
- *                 ************************
- * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, see
- * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
@@ -53,6 +38,14 @@ void sctp_inq_init(struct sctp_inq *queue)
 	INIT_WORK(&queue->immediate, NULL);
 }
 
+/* Properly release the chunk which is being worked on. */
+static inline void sctp_inq_chunk_free(struct sctp_chunk *chunk)
+{
+	if (chunk->head_skb)
+		chunk->skb = chunk->head_skb;
+	sctp_chunk_free(chunk);
+}
+
 /* Release the memory associated with an SCTP inqueue.  */
 void sctp_inq_free(struct sctp_inq *queue)
 {
@@ -68,7 +61,7 @@ void sctp_inq_free(struct sctp_inq *queue)
 	 * free it as well.
 	 */
 	if (queue->in_progress) {
-		sctp_chunk_free(queue->in_progress);
+		sctp_inq_chunk_free(queue->in_progress);
 		queue->in_progress = NULL;
 	}
 }
@@ -78,8 +71,11 @@ void sctp_inq_free(struct sctp_inq *queue)
  */
 void sctp_inq_push(struct sctp_inq *q, struct sctp_chunk *chunk)
 {
-	/* Directly call the packet handling routine. */
-	if (chunk->rcvr->dead) {
+	/* Directly call the packet handling routine.  Drop the chunk if the
+	 * receiver or the transport it was looked up on is gone.
+	 */
+	if (chunk->rcvr->dead ||
+	    (chunk->transport && chunk->transport->dead)) {
 		sctp_chunk_free(chunk);
 		return;
 	}
@@ -99,7 +95,7 @@ void sctp_inq_push(struct sctp_inq *q, struct sctp_chunk *chunk)
 struct sctp_chunkhdr *sctp_inq_peek(struct sctp_inq *queue)
 {
 	struct sctp_chunk *chunk;
-	sctp_chunkhdr_t *ch = NULL;
+	struct sctp_chunkhdr *ch = NULL;
 
 	chunk = queue->in_progress;
 	/* If there is no more chunks in this packet, say so */
@@ -108,7 +104,7 @@ struct sctp_chunkhdr *sctp_inq_peek(struct sctp_inq *queue)
 	    chunk->pdiscard)
 		    return NULL;
 
-	ch = (sctp_chunkhdr_t *)chunk->chunk_end;
+	ch = (struct sctp_chunkhdr *)chunk->chunk_end;
 
 	return ch;
 }
@@ -122,7 +118,7 @@ struct sctp_chunkhdr *sctp_inq_peek(struct sctp_inq *queue)
 struct sctp_chunk *sctp_inq_pop(struct sctp_inq *queue)
 {
 	struct sctp_chunk *chunk;
-	sctp_chunkhdr_t *ch = NULL;
+	struct sctp_chunkhdr *ch = NULL;
 
 	/* The assumption is that we are safe to process the chunks
 	 * at this time.
@@ -145,13 +141,11 @@ struct sctp_chunk *sctp_inq_pop(struct sctp_inq *queue)
 				goto new_skb;
 			}
 
-			if (chunk->head_skb)
-				chunk->skb = chunk->head_skb;
-			sctp_chunk_free(chunk);
+			sctp_inq_chunk_free(chunk);
 			chunk = queue->in_progress = NULL;
 		} else {
 			/* Nothing to do. Next chunk in the packet, please. */
-			ch = (sctp_chunkhdr_t *) chunk->chunk_end;
+			ch = (struct sctp_chunkhdr *)chunk->chunk_end;
 			/* Force chunk->skb->data to chunk->chunk_end.  */
 			skb_pull(chunk->skb, chunk->chunk_end - chunk->skb->data);
 			/* We are guaranteed to pull a SCTP header. */
@@ -170,20 +164,7 @@ next_chunk:
 
 		chunk = list_entry(entry, struct sctp_chunk, list);
 
-		/* Linearize if it's not GSO */
-		if ((skb_shinfo(chunk->skb)->gso_type & SKB_GSO_SCTP) != SKB_GSO_SCTP &&
-		    skb_is_nonlinear(chunk->skb)) {
-			if (skb_linearize(chunk->skb)) {
-				__SCTP_INC_STATS(dev_net(chunk->skb->dev), SCTP_MIB_IN_PKT_DISCARDS);
-				sctp_chunk_free(chunk);
-				goto next_chunk;
-			}
-
-			/* Update sctp_hdr as it probably changed */
-			chunk->sctp_hdr = sctp_hdr(chunk->skb);
-		}
-
-		if ((skb_shinfo(chunk->skb)->gso_type & SKB_GSO_SCTP) == SKB_GSO_SCTP) {
+		if (skb_is_gso(chunk->skb) && skb_is_gso_sctp(chunk->skb)) {
 			/* GSO-marked skbs but without frags, handle
 			 * them normally
 			 */
@@ -191,13 +172,14 @@ next_chunk:
 				chunk->head_skb = chunk->skb;
 
 			/* skbs with "cover letter" */
-			if (chunk->head_skb && chunk->skb->data_len == chunk->skb->len)
+			if (chunk->head_skb && chunk->skb->data_len == chunk->skb->len) {
+				if (WARN_ON(!skb_shinfo(chunk->skb)->frag_list)) {
+					__SCTP_INC_STATS(dev_net(chunk->skb->dev),
+							 SCTP_MIB_IN_PKT_DISCARDS);
+					sctp_chunk_free(chunk);
+					goto next_chunk;
+				}
 				chunk->skb = skb_shinfo(chunk->skb)->frag_list;
-
-			if (WARN_ON(!chunk->skb)) {
-				__SCTP_INC_STATS(dev_net(chunk->skb->dev), SCTP_MIB_IN_PKT_DISCARDS);
-				sctp_chunk_free(chunk);
-				goto next_chunk;
 			}
 		}
 
@@ -208,7 +190,7 @@ next_chunk:
 
 new_skb:
 		/* This is the first chunk in the packet.  */
-		ch = (sctp_chunkhdr_t *) chunk->skb->data;
+		ch = (struct sctp_chunkhdr *)chunk->skb->data;
 		chunk->singleton = 1;
 		chunk->data_accepted = 0;
 		chunk->pdiscard = 0;
@@ -222,16 +204,18 @@ new_skb:
 
 			cb->chunk = head_cb->chunk;
 			cb->af = head_cb->af;
+			cb->encap_port = head_cb->encap_port;
 		}
 	}
 
 	chunk->chunk_hdr = ch;
-	chunk->chunk_end = ((__u8 *)ch) + WORD_ROUND(ntohs(ch->length));
-	skb_pull(chunk->skb, sizeof(sctp_chunkhdr_t));
+	chunk->chunk_end = ((__u8 *)ch) + SCTP_PAD4(ntohs(ch->length));
+	skb_pull(chunk->skb, sizeof(*ch));
 	chunk->subh.v = NULL; /* Subheader is no longer valid.  */
-
-	if (chunk->chunk_end + sizeof(sctp_chunkhdr_t) <
-	    skb_tail_pointer(chunk->skb)) {
+	if (unlikely(ntohs(ch->length) < sizeof(*ch))) {
+		chunk->pdiscard = 1;
+	} else if (chunk->chunk_end + sizeof(*ch) <=
+		   skb_tail_pointer(chunk->skb)) {
 		/* This is not a singleton */
 		chunk->singleton = 0;
 	} else if (chunk->chunk_end > skb_tail_pointer(chunk->skb)) {

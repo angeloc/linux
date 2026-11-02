@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_HASH_H
 #define _ASM_HASH_H
+
+#include <linux/wordpart.h>
 
 /*
  * If CONFIG_M68000=y (original mc68000/010), this file is #included
@@ -53,7 +56,7 @@ static inline u32 __attribute_const__ __hash_32(u32 x)
 	: "=&d,d" (a), "=&r,r" (b)
 	: "r,roi?" (x));	/* a+b = x*0x8647 */
 
-	return ((u16)(x*0x61c8) << 16) + a + b;
+	return (lower_16_bits(x * 0x61c8) << 16) + a + b;
 }
 
 #endif	/* _ASM_HASH_H */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/include/linux/sunrpc/debug.h
  *
@@ -13,41 +14,49 @@
 /*
  * Debugging macros etc
  */
-#if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
 extern unsigned int		rpc_debug;
 extern unsigned int		nfs_debug;
 extern unsigned int		nfsd_debug;
 extern unsigned int		nlm_debug;
-#endif
 
-#define dprintk(args...)	dfprintk(FACILITY, ## args)
-#define dprintk_rcu(args...)	dfprintk_rcu(FACILITY, ## args)
+#define dprintk(fmt, ...)						\
+	dfprintk(FACILITY, fmt, ##__VA_ARGS__)
+#define dprintk_rcu(fmt, ...)						\
+	dfprintk_rcu(FACILITY, fmt, ##__VA_ARGS__)
 
 #undef ifdebug
 #if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
 # define ifdebug(fac)		if (unlikely(rpc_debug & RPCDBG_##fac))
 
-# define dfprintk(fac, args...)	\
-	do { \
-		ifdebug(fac) \
-			printk(KERN_DEFAULT args); \
-	} while (0)
+# if IS_ENABLED(CONFIG_SUNRPC_DEBUG_TRACE)
+#  define __sunrpc_printk(fmt, ...)	trace_printk(fmt, ##__VA_ARGS__)
+# else
+#  define __sunrpc_printk(fmt, ...)	printk(KERN_DEFAULT fmt, ##__VA_ARGS__)
+# endif
 
-# define dfprintk_rcu(fac, args...)	\
-	do { \
-		ifdebug(fac) { \
-			rcu_read_lock(); \
-			printk(KERN_DEFAULT args); \
-			rcu_read_unlock(); \
-		} \
-	} while (0)
+# define dfprintk(fac, fmt, ...)					\
+do {									\
+	ifdebug(fac)							\
+		__sunrpc_printk(fmt, ##__VA_ARGS__);			\
+	else								\
+		no_printk(fmt, ##__VA_ARGS__);				\
+} while (0)
 
-# define RPC_IFDEBUG(x)		x
+# define dfprintk_rcu(fac, fmt, ...)					\
+do {									\
+	ifdebug(fac) {							\
+		rcu_read_lock();					\
+		__sunrpc_printk(fmt, ##__VA_ARGS__);			\
+		rcu_read_unlock();					\
+	} else {							\
+		no_printk(fmt, ##__VA_ARGS__);				\
+	}								\
+} while (0)
+
 #else
 # define ifdebug(fac)		if (0)
-# define dfprintk(fac, args...)	do {} while (0)
-# define dfprintk_rcu(fac, args...)	do {} while (0)
-# define RPC_IFDEBUG(x)
+# define dfprintk(fac, fmt, ...)	no_printk(fmt, ##__VA_ARGS__)
+# define dfprintk_rcu(fac, fmt, ...)	no_printk(fmt, ##__VA_ARGS__)
 #endif
 
 /*

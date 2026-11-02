@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 if SH_HIGHLANDER
 
 choice
@@ -19,6 +20,7 @@ config SH_R7785RP
 	bool "R7785RP board support"
 	depends on CPU_SUBTYPE_SH7785
 	select GPIOLIB
+	select GPIOLIB_LEGACY
 
 endchoice
 

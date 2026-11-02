@@ -1,20 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
 	Copyright (C) 2010 Willow Garage <http://www.willowgarage.com>
 	Copyright (C) 2004 - 2010 Ivo van Doorn <IvDoorn@gmail.com>
 	<http://rt2x00.serialmonkey.com>
 
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-	GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -26,6 +15,8 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/log2.h>
+#include <linux/of.h>
+#include <linux/of_net.h>
 
 #include "rt2x00.h"
 #include "rt2x00lib.h"
@@ -85,9 +76,6 @@ int rt2x00lib_enable_radio(struct rt2x00_dev *rt2x00dev)
 	 */
 	rt2x00queue_start_queues(rt2x00dev);
 	rt2x00link_start_tuner(rt2x00dev);
-	rt2x00link_start_agc(rt2x00dev);
-	if (rt2x00_has_cap_vco_recalibration(rt2x00dev))
-		rt2x00link_start_vcocal(rt2x00dev);
 
 	/*
 	 * Start watchdog monitoring.
@@ -110,12 +98,10 @@ void rt2x00lib_disable_radio(struct rt2x00_dev *rt2x00dev)
 	/*
 	 * Stop all queues
 	 */
-	rt2x00link_stop_agc(rt2x00dev);
-	if (rt2x00_has_cap_vco_recalibration(rt2x00dev))
-		rt2x00link_stop_vcocal(rt2x00dev);
 	rt2x00link_stop_tuner(rt2x00dev);
 	rt2x00queue_stop_queues(rt2x00dev);
 	rt2x00queue_flush_queues(rt2x00dev, true);
+	rt2x00queue_stop_queue(rt2x00dev->bcn);
 
 	/*
 	 * Disable radio.
@@ -209,8 +195,7 @@ static void rt2x00lib_beaconupdate_iter(void *data, u8 *mac,
 
 	if (vif->type != NL80211_IFTYPE_AP &&
 	    vif->type != NL80211_IFTYPE_ADHOC &&
-	    vif->type != NL80211_IFTYPE_MESH_POINT &&
-	    vif->type != NL80211_IFTYPE_WDS)
+	    vif->type != NL80211_IFTYPE_MESH_POINT)
 		return;
 
 	/*
@@ -317,73 +302,14 @@ static inline int rt2x00lib_txdone_bar_status(struct queue_entry *entry)
 	return ret;
 }
 
-void rt2x00lib_txdone(struct queue_entry *entry,
-		      struct txdone_entry_desc *txdesc)
+static void rt2x00lib_fill_tx_status(struct rt2x00_dev *rt2x00dev,
+				     struct ieee80211_tx_info *tx_info,
+				     struct skb_frame_desc *skbdesc,
+				     struct txdone_entry_desc *txdesc,
+				     bool success)
 {
-	struct rt2x00_dev *rt2x00dev = entry->queue->rt2x00dev;
-	struct ieee80211_tx_info *tx_info = IEEE80211_SKB_CB(entry->skb);
-	struct skb_frame_desc *skbdesc = get_skb_frame_desc(entry->skb);
-	unsigned int header_length, i;
 	u8 rate_idx, rate_flags, retry_rates;
-	u8 skbdesc_flags = skbdesc->flags;
-	bool success;
-
-	/*
-	 * Unmap the skb.
-	 */
-	rt2x00queue_unmap_skb(entry);
-
-	/*
-	 * Remove the extra tx headroom from the skb.
-	 */
-	skb_pull(entry->skb, rt2x00dev->extra_tx_headroom);
-
-	/*
-	 * Signal that the TX descriptor is no longer in the skb.
-	 */
-	skbdesc->flags &= ~SKBDESC_DESC_IN_SKB;
-
-	/*
-	 * Determine the length of 802.11 header.
-	 */
-	header_length = ieee80211_get_hdrlen_from_skb(entry->skb);
-
-	/*
-	 * Remove L2 padding which was added during
-	 */
-	if (rt2x00_has_cap_flag(rt2x00dev, REQUIRE_L2PAD))
-		rt2x00queue_remove_l2pad(entry->skb, header_length);
-
-	/*
-	 * If the IV/EIV data was stripped from the frame before it was
-	 * passed to the hardware, we should now reinsert it again because
-	 * mac80211 will expect the same data to be present it the
-	 * frame as it was passed to us.
-	 */
-	if (rt2x00_has_cap_hw_crypto(rt2x00dev))
-		rt2x00crypto_tx_insert_iv(entry->skb, header_length);
-
-	/*
-	 * Send frame to debugfs immediately, after this call is completed
-	 * we are going to overwrite the skb->cb array.
-	 */
-	rt2x00debug_dump_frame(rt2x00dev, DUMP_FRAME_TXDONE, entry->skb);
-
-	/*
-	 * Determine if the frame has been successfully transmitted and
-	 * remove BARs from our check list while checking for their
-	 * TX status.
-	 */
-	success =
-	    rt2x00lib_txdone_bar_status(entry) ||
-	    test_bit(TXDONE_SUCCESS, &txdesc->flags) ||
-	    test_bit(TXDONE_UNKNOWN, &txdesc->flags);
-
-	/*
-	 * Update TX statistics.
-	 */
-	rt2x00dev->link.qual.tx_success += success;
-	rt2x00dev->link.qual.tx_failed += !success;
+	int i;
 
 	rate_idx = skbdesc->tx_rate_idx;
 	rate_flags = skbdesc->tx_rate_flags;
@@ -420,6 +346,9 @@ void rt2x00lib_txdone(struct queue_entry *entry,
 	if (i < (IEEE80211_TX_MAX_RATES - 1))
 		tx_info->status.rates[i].idx = -1; /* terminate */
 
+	if (test_bit(TXDONE_NO_ACK_REQ, &txdesc->flags))
+		tx_info->flags |= IEEE80211_TX_CTL_NO_ACK;
+
 	if (!(tx_info->flags & IEEE80211_TX_CTL_NO_ACK)) {
 		if (success)
 			tx_info->flags |= IEEE80211_TX_STAT_ACK;
@@ -428,7 +357,7 @@ void rt2x00lib_txdone(struct queue_entry *entry,
 	}
 
 	/*
-	 * Every single frame has it's own tx status, hence report
+	 * Every single frame has its own tx status, hence report
 	 * every frame as ampdu of size 1.
 	 *
 	 * TODO: if we can find out how many frames were aggregated
@@ -438,12 +367,10 @@ void rt2x00lib_txdone(struct queue_entry *entry,
 	 */
 	if (test_bit(TXDONE_AMPDU, &txdesc->flags) ||
 	    tx_info->flags & IEEE80211_TX_CTL_AMPDU) {
-		tx_info->flags |= IEEE80211_TX_STAT_AMPDU;
+		tx_info->flags |= IEEE80211_TX_STAT_AMPDU |
+				  IEEE80211_TX_CTL_AMPDU;
 		tx_info->status.ampdu_len = 1;
 		tx_info->status.ampdu_ack_len = success ? 1 : 0;
-
-		if (!success)
-			tx_info->flags |= IEEE80211_TX_STAT_AMPDU_NO_BACK;
 	}
 
 	if (rate_flags & IEEE80211_TX_RC_USE_RTS_CTS) {
@@ -452,21 +379,11 @@ void rt2x00lib_txdone(struct queue_entry *entry,
 		else
 			rt2x00dev->low_level_stats.dot11RTSFailureCount++;
 	}
+}
 
-	/*
-	 * Only send the status report to mac80211 when it's a frame
-	 * that originated in mac80211. If this was a extra frame coming
-	 * through a mac80211 library call (RTS/CTS) then we should not
-	 * send the status report back.
-	 */
-	if (!(skbdesc_flags & SKBDESC_NOT_MAC80211)) {
-		if (rt2x00_has_cap_flag(rt2x00dev, REQUIRE_TASKLET_CONTEXT))
-			ieee80211_tx_status(rt2x00dev->hw, entry->skb);
-		else
-			ieee80211_tx_status_ni(rt2x00dev->hw, entry->skb);
-	} else
-		dev_kfree_skb_any(entry->skb);
-
+static void rt2x00lib_clear_entry(struct rt2x00_dev *rt2x00dev,
+				  struct queue_entry *entry)
+{
 	/*
 	 * Make this entry available for reuse.
 	 */
@@ -488,6 +405,143 @@ void rt2x00lib_txdone(struct queue_entry *entry,
 	if (!rt2x00queue_threshold(entry->queue))
 		rt2x00queue_unpause_queue(entry->queue);
 	spin_unlock_bh(&entry->queue->tx_lock);
+}
+
+void rt2x00lib_txdone_nomatch(struct queue_entry *entry,
+			      struct txdone_entry_desc *txdesc)
+{
+	struct rt2x00_dev *rt2x00dev = entry->queue->rt2x00dev;
+	struct skb_frame_desc *skbdesc = get_skb_frame_desc(entry->skb);
+	struct ieee80211_tx_info txinfo = {};
+	bool success;
+
+	/*
+	 * Unmap the skb.
+	 */
+	rt2x00queue_unmap_skb(entry);
+
+	/*
+	 * Signal that the TX descriptor is no longer in the skb.
+	 */
+	skbdesc->flags &= ~SKBDESC_DESC_IN_SKB;
+
+	/*
+	 * Send frame to debugfs immediately, after this call is completed
+	 * we are going to overwrite the skb->cb array.
+	 */
+	rt2x00debug_dump_frame(rt2x00dev, DUMP_FRAME_TXDONE, entry);
+
+	/*
+	 * Determine if the frame has been successfully transmitted and
+	 * remove BARs from our check list while checking for their
+	 * TX status.
+	 */
+	success =
+	    rt2x00lib_txdone_bar_status(entry) ||
+	    test_bit(TXDONE_SUCCESS, &txdesc->flags);
+
+	if (!test_bit(TXDONE_UNKNOWN, &txdesc->flags)) {
+		/*
+		 * Update TX statistics.
+		 */
+		rt2x00dev->link.qual.tx_success += success;
+		rt2x00dev->link.qual.tx_failed += !success;
+
+		rt2x00lib_fill_tx_status(rt2x00dev, &txinfo, skbdesc, txdesc,
+					 success);
+		ieee80211_tx_status_noskb(rt2x00dev->hw, skbdesc->sta, &txinfo);
+	}
+
+	dev_kfree_skb_any(entry->skb);
+	rt2x00lib_clear_entry(rt2x00dev, entry);
+}
+EXPORT_SYMBOL_GPL(rt2x00lib_txdone_nomatch);
+
+void rt2x00lib_txdone(struct queue_entry *entry,
+		      struct txdone_entry_desc *txdesc)
+{
+	struct rt2x00_dev *rt2x00dev = entry->queue->rt2x00dev;
+	struct ieee80211_tx_info *tx_info = IEEE80211_SKB_CB(entry->skb);
+	struct skb_frame_desc *skbdesc = get_skb_frame_desc(entry->skb);
+	u8 skbdesc_flags = skbdesc->flags;
+	unsigned int header_length;
+	bool success;
+
+	/*
+	 * Unmap the skb.
+	 */
+	rt2x00queue_unmap_skb(entry);
+
+	/*
+	 * Remove the extra tx headroom from the skb.
+	 */
+	skb_pull(entry->skb, rt2x00dev->extra_tx_headroom);
+
+	/*
+	 * Signal that the TX descriptor is no longer in the skb.
+	 */
+	skbdesc->flags &= ~SKBDESC_DESC_IN_SKB;
+
+	/*
+	 * Determine the length of 802.11 header.
+	 */
+	header_length = ieee80211_get_hdrlen_from_skb(entry->skb);
+
+	/*
+	 * Remove L2 padding which was added during
+	 */
+	if (rt2x00_has_cap_flag(rt2x00dev, REQUIRE_L2PAD))
+		rt2x00queue_remove_l2pad(entry->skb, header_length);
+
+	/*
+	 * If the IV/EIV data was stripped from the frame before it was
+	 * passed to the hardware, we should now reinsert it again because
+	 * mac80211 will expect the same data to be present in the
+	 * frame as it was passed to us.
+	 */
+	if (rt2x00_has_cap_hw_crypto(rt2x00dev))
+		rt2x00crypto_tx_insert_iv(entry->skb, header_length);
+
+	/*
+	 * Send frame to debugfs immediately, after this call is completed
+	 * we are going to overwrite the skb->cb array.
+	 */
+	rt2x00debug_dump_frame(rt2x00dev, DUMP_FRAME_TXDONE, entry);
+
+	/*
+	 * Determine if the frame has been successfully transmitted and
+	 * remove BARs from our check list while checking for their
+	 * TX status.
+	 */
+	success =
+	    rt2x00lib_txdone_bar_status(entry) ||
+	    test_bit(TXDONE_SUCCESS, &txdesc->flags) ||
+	    test_bit(TXDONE_UNKNOWN, &txdesc->flags);
+
+	/*
+	 * Update TX statistics.
+	 */
+	rt2x00dev->link.qual.tx_success += success;
+	rt2x00dev->link.qual.tx_failed += !success;
+
+	rt2x00lib_fill_tx_status(rt2x00dev, tx_info, skbdesc, txdesc, success);
+
+	/*
+	 * Only send the status report to mac80211 when it's a frame
+	 * that originated in mac80211. If this was a extra frame coming
+	 * through a mac80211 library call (RTS/CTS) then we should not
+	 * send the status report back.
+	 */
+	if (!(skbdesc_flags & SKBDESC_NOT_MAC80211)) {
+		if (rt2x00_has_cap_flag(rt2x00dev, REQUIRE_TASKLET_CONTEXT))
+			ieee80211_tx_status_skb(rt2x00dev->hw, entry->skb);
+		else
+			ieee80211_tx_status_ni(rt2x00dev->hw, entry->skb);
+	} else {
+		dev_kfree_skb_any(entry->skb);
+	}
+
+	rt2x00lib_clear_entry(rt2x00dev, entry);
 }
 EXPORT_SYMBOL_GPL(rt2x00lib_txdone);
 
@@ -625,7 +679,7 @@ static void rt2x00lib_rxdone_check_ps(struct rt2x00_dev *rt2x00dev,
 	/* Check whenever the PHY can be turned off again. */
 
 	/* 1. What about buffered unicast traffic for our AID? */
-	cam = ieee80211_check_tim(tim_ie, tim_len, rt2x00dev->aid);
+	cam = ieee80211_check_tim(tim_ie, tim_len, rt2x00dev->aid, false);
 
 	/* 2. Maybe the AP wants to send multicast/broadcast data? */
 	cam |= (tim_ie->bitmap_ctrl & 0x01);
@@ -757,7 +811,7 @@ void rt2x00lib_rxdone(struct queue_entry *entry, gfp_t gfp)
 	rate_idx = rt2x00lib_rxdone_read_signal(rt2x00dev, &rxdesc);
 	if (rxdesc.rate_mode == RATE_MODE_HT_MIX ||
 	    rxdesc.rate_mode == RATE_MODE_HT_GREENFIELD)
-		rxdesc.flags |= RX_FLAG_HT;
+		rxdesc.encoding = RX_ENC_HT;
 
 	/*
 	 * Check if this is a beacon, and more frames have been
@@ -776,7 +830,7 @@ void rt2x00lib_rxdone(struct queue_entry *entry, gfp_t gfp)
 	 */
 	rt2x00link_update_stats(rt2x00dev, entry->skb, &rxdesc);
 	rt2x00debug_update_crypto(rt2x00dev, &rxdesc);
-	rt2x00debug_dump_frame(rt2x00dev, DUMP_FRAME_RXDONE, entry->skb);
+	rt2x00debug_dump_frame(rt2x00dev, DUMP_FRAME_RXDONE, entry);
 
 	/*
 	 * Initialize RX status information, and send frame
@@ -797,6 +851,9 @@ void rt2x00lib_rxdone(struct queue_entry *entry, gfp_t gfp)
 	rx_status->rate_idx = rate_idx;
 	rx_status->signal = rxdesc.rssi;
 	rx_status->flag = rxdesc.flags;
+	rx_status->enc_flags = rxdesc.enc_flags;
+	rx_status->encoding = rxdesc.encoding;
+	rx_status->bw = rxdesc.bw;
 	rx_status->antenna = rt2x00dev->link.ant.active.rx;
 
 	ieee80211_rx_ni(rt2x00dev->hw, entry->skb);
@@ -931,6 +988,23 @@ static void rt2x00lib_rate(struct ieee80211_rate *entry,
 		entry->flags |= IEEE80211_RATE_SHORT_PREAMBLE;
 }
 
+int rt2x00lib_set_mac_address(struct rt2x00_dev *rt2x00dev, u8 *eeprom_mac_addr)
+{
+	int ret;
+
+	ret = of_get_mac_address(rt2x00dev->dev->of_node, eeprom_mac_addr);
+	if (ret == -EPROBE_DEFER)
+		return ret;
+
+	if (!is_valid_ether_addr(eeprom_mac_addr)) {
+		eth_random_addr(eeprom_mac_addr);
+		rt2x00_eeprom_dbg(rt2x00dev, "MAC: %pM\n", eeprom_mac_addr);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(rt2x00lib_set_mac_address);
+
 static int rt2x00lib_probe_hw_modes(struct rt2x00_dev *rt2x00dev,
 				    struct hw_mode_spec *spec)
 {
@@ -946,11 +1020,11 @@ static int rt2x00lib_probe_hw_modes(struct rt2x00_dev *rt2x00dev,
 	if (spec->supported_rates & SUPPORT_RATE_OFDM)
 		num_rates += 8;
 
-	channels = kcalloc(spec->num_channels, sizeof(*channels), GFP_KERNEL);
+	channels = kzalloc_objs(*channels, spec->num_channels);
 	if (!channels)
 		return -ENOMEM;
 
-	rates = kcalloc(num_rates, sizeof(*rates), GFP_KERNEL);
+	rates = kzalloc_objs(*rates, num_rates);
 	if (!rates)
 		goto exit_free_channels;
 
@@ -1024,7 +1098,21 @@ static void rt2x00lib_remove_hw(struct rt2x00_dev *rt2x00dev)
 	}
 
 	kfree(rt2x00dev->spec.channels_info);
+	kfree(rt2x00dev->chan_survey);
 }
+
+static const struct ieee80211_tpt_blink rt2x00_tpt_blink[] = {
+	{ .throughput = 0 * 1024, .blink_time = 334 },
+	{ .throughput = 1 * 1024, .blink_time = 260 },
+	{ .throughput = 2 * 1024, .blink_time = 220 },
+	{ .throughput = 5 * 1024, .blink_time = 190 },
+	{ .throughput = 10 * 1024, .blink_time = 170 },
+	{ .throughput = 25 * 1024, .blink_time = 150 },
+	{ .throughput = 54 * 1024, .blink_time = 130 },
+	{ .throughput = 120 * 1024, .blink_time = 110 },
+	{ .throughput = 265 * 1024, .blink_time = 80 },
+	{ .throughput = 586 * 1024, .blink_time = 50 },
+};
 
 static int rt2x00lib_probe_hw(struct rt2x00_dev *rt2x00dev)
 {
@@ -1095,9 +1183,8 @@ static int rt2x00lib_probe_hw(struct rt2x00_dev *rt2x00dev)
 	 */
 #define RT2X00_TASKLET_INIT(taskletname) \
 	if (rt2x00dev->ops->lib->taskletname) { \
-		tasklet_init(&rt2x00dev->taskletname, \
-			     rt2x00dev->ops->lib->taskletname, \
-			     (unsigned long)rt2x00dev); \
+		tasklet_setup(&rt2x00dev->taskletname, \
+			     rt2x00dev->ops->lib->taskletname); \
 	}
 
 	RT2X00_TASKLET_INIT(txstatus_tasklet);
@@ -1107,6 +1194,11 @@ static int rt2x00lib_probe_hw(struct rt2x00_dev *rt2x00dev)
 	RT2X00_TASKLET_INIT(autowake_tasklet);
 
 #undef RT2X00_TASKLET_INIT
+
+	ieee80211_create_tpt_led_trigger(rt2x00dev->hw,
+					 IEEE80211_TPT_LEDTRIG_FL_RADIO,
+					 rt2x00_tpt_blink,
+					 ARRAY_SIZE(rt2x00_tpt_blink));
 
 	/*
 	 * Register HW.
@@ -1181,10 +1273,7 @@ static int rt2x00lib_initialize(struct rt2x00_dev *rt2x00dev)
 
 int rt2x00lib_start(struct rt2x00_dev *rt2x00dev)
 {
-	int retval;
-
-	if (test_bit(DEVICE_STATE_STARTED, &rt2x00dev->flags))
-		return 0;
+	int retval = 0;
 
 	/*
 	 * If this is the first interface which is added,
@@ -1192,27 +1281,29 @@ int rt2x00lib_start(struct rt2x00_dev *rt2x00dev)
 	 */
 	retval = rt2x00lib_load_firmware(rt2x00dev);
 	if (retval)
-		return retval;
+		goto out;
 
 	/*
 	 * Initialize the device.
 	 */
 	retval = rt2x00lib_initialize(rt2x00dev);
 	if (retval)
-		return retval;
+		goto out;
 
 	rt2x00dev->intf_ap_count = 0;
 	rt2x00dev->intf_sta_count = 0;
 	rt2x00dev->intf_associated = 0;
+	rt2x00dev->intf_beaconing = 0;
 
 	/* Enable the radio */
 	retval = rt2x00lib_enable_radio(rt2x00dev);
 	if (retval)
-		return retval;
+		goto out;
 
 	set_bit(DEVICE_STATE_STARTED, &rt2x00dev->flags);
 
-	return 0;
+out:
+	return retval;
 }
 
 void rt2x00lib_stop(struct rt2x00_dev *rt2x00dev)
@@ -1229,6 +1320,7 @@ void rt2x00lib_stop(struct rt2x00_dev *rt2x00dev)
 	rt2x00dev->intf_ap_count = 0;
 	rt2x00dev->intf_sta_count = 0;
 	rt2x00dev->intf_associated = 0;
+	rt2x00dev->intf_beaconing = 0;
 }
 
 static inline void rt2x00lib_set_if_combinations(struct rt2x00_dev *rt2x00dev)
@@ -1296,14 +1388,17 @@ int rt2x00lib_probe_dev(struct rt2x00_dev *rt2x00dev)
 			                      GFP_KERNEL);
 		if (!rt2x00dev->drv_data) {
 			retval = -ENOMEM;
-			goto exit;
+			return retval;
 		}
 	}
 
 	spin_lock_init(&rt2x00dev->irqmask_lock);
 	mutex_init(&rt2x00dev->csr_mutex);
+	mutex_init(&rt2x00dev->conf_mutex);
 	INIT_LIST_HEAD(&rt2x00dev->bar_list);
 	spin_lock_init(&rt2x00dev->bar_list_lock);
+	hrtimer_setup(&rt2x00dev->txstatus_timer, hrtimer_dummy_timeout, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
 
 	set_bit(DEVICE_STATE_PRESENT, &rt2x00dev->flags);
 
@@ -1327,7 +1422,7 @@ int rt2x00lib_probe_dev(struct rt2x00_dev *rt2x00dev)
 	    alloc_ordered_workqueue("%s", 0, wiphy_name(rt2x00dev->hw->wiphy));
 	if (!rt2x00dev->workqueue) {
 		retval = -ENOMEM;
-		goto exit;
+		goto exit_free_drv_data;
 	}
 
 	INIT_WORK(&rt2x00dev->intf_work, rt2x00lib_intf_scheduled);
@@ -1362,13 +1457,15 @@ int rt2x00lib_probe_dev(struct rt2x00_dev *rt2x00dev)
 	if (rt2x00dev->bcn->limit > 0)
 		rt2x00dev->hw->wiphy->interface_modes |=
 		    BIT(NL80211_IFTYPE_ADHOC) |
-		    BIT(NL80211_IFTYPE_AP) |
 #ifdef CONFIG_MAC80211_MESH
 		    BIT(NL80211_IFTYPE_MESH_POINT) |
 #endif
-		    BIT(NL80211_IFTYPE_WDS);
+		    BIT(NL80211_IFTYPE_AP);
 
 	rt2x00dev->hw->wiphy->flags |= WIPHY_FLAG_IBSS_RSN;
+
+	wiphy_ext_feature_set(rt2x00dev->hw->wiphy,
+			      NL80211_EXT_FEATURE_CQM_RSSI_LIST);
 
 	/*
 	 * Initialize ieee80211 structure.
@@ -1398,6 +1495,14 @@ exit:
 	rt2x00lib_remove_dev(rt2x00dev);
 
 	return retval;
+
+exit_free_drv_data:
+	clear_bit(DEVICE_STATE_PRESENT, &rt2x00dev->flags);
+
+	kfree(rt2x00dev->drv_data);
+	rt2x00dev->drv_data = NULL;
+
+	return retval;
 }
 EXPORT_SYMBOL_GPL(rt2x00lib_probe_dev);
 
@@ -1422,21 +1527,8 @@ void rt2x00lib_remove_dev(struct rt2x00_dev *rt2x00dev)
 	cancel_work_sync(&rt2x00dev->intf_work);
 	cancel_delayed_work_sync(&rt2x00dev->autowakeup_work);
 	cancel_work_sync(&rt2x00dev->sleep_work);
-#ifdef CONFIG_RT2X00_LIB_USB
-	if (rt2x00_is_usb(rt2x00dev)) {
-		usb_kill_anchored_urbs(rt2x00dev->anchor);
-		hrtimer_cancel(&rt2x00dev->txstatus_timer);
-		cancel_work_sync(&rt2x00dev->rxdone_work);
-		cancel_work_sync(&rt2x00dev->txdone_work);
-	}
-#endif
-	if (rt2x00dev->workqueue)
-		destroy_workqueue(rt2x00dev->workqueue);
 
-	/*
-	 * Free the tx status fifo.
-	 */
-	kfifo_free(&rt2x00dev->txstatus_fifo);
+	hrtimer_cancel(&rt2x00dev->txstatus_timer);
 
 	/*
 	 * Kill the tx status tasklet.
@@ -1451,6 +1543,14 @@ void rt2x00lib_remove_dev(struct rt2x00_dev *rt2x00dev)
 	 * Uninitialize device.
 	 */
 	rt2x00lib_uninitialize(rt2x00dev);
+
+	if (rt2x00dev->workqueue)
+		destroy_workqueue(rt2x00dev->workqueue);
+
+	/*
+	 * Free the tx status fifo.
+	 */
+	kfifo_free(&rt2x00dev->txstatus_fifo);
 
 	/*
 	 * Free extra components
@@ -1483,8 +1583,7 @@ EXPORT_SYMBOL_GPL(rt2x00lib_remove_dev);
 /*
  * Device state handlers
  */
-#ifdef CONFIG_PM
-int rt2x00lib_suspend(struct rt2x00_dev *rt2x00dev, pm_message_t state)
+int rt2x00lib_suspend(struct rt2x00_dev *rt2x00dev)
 {
 	rt2x00_dbg(rt2x00dev, "Going to sleep\n");
 
@@ -1541,7 +1640,6 @@ int rt2x00lib_resume(struct rt2x00_dev *rt2x00dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rt2x00lib_resume);
-#endif /* CONFIG_PM */
 
 /*
  * rt2x00lib module information.

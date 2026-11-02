@@ -5,20 +5,23 @@
  *              Licensed under the GPLv2
  *
  *  This test signals the kernel to insert a leap second
- *  every day at midnight GMT. This allows for stessing the
+ *  every day at midnight GMT. This allows for stressing the
  *  kernel's leap-second behavior, as well as how well applications
  *  handle the leap-second discontinuity.
  *
- *  Usage: leap-a-day [-s] [-i <num>]
+ *  Usage: leap-a-day [-w] [-i <num>] [-t]
  *
  *  Options:
- *	-s:	Each iteration, set the date to 10 seconds before midnight GMT.
- *		This speeds up the number of leapsecond transitions tested,
- *		but because it calls settimeofday frequently, advancing the
- *		time by 24 hours every ~16 seconds, it may cause application
- *		disruption.
+ *	-w:	Only set the leap-second flag and wait for the leap second
+ *		each iteration, instead of advancing the time. By default the
+ *		date is set to 10 seconds before midnight GMT, which speeds up
+ *		the number of leapsecond transitions tested, but because it
+ *		calls settimeofday frequently, advancing the time by 24 hours
+ *		every ~16 seconds, it may cause application disruption.
  *
- *	-i:	Number of iterations to run (default: infinite)
+ *	-i:	Number of iterations to run (-1 = infinite, default: 10)
+ *
+ *	-t:	Print TAI time.
  *
  *  Other notes: Disabling NTP prior to running this is advised, as the two
  *		 may conflict in their commands to the kernel.
@@ -48,20 +51,9 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
-#ifdef KTEST
-#include "../kselftest.h"
-#else
-static inline int ksft_exit_pass(void)
-{
-	exit(0);
-}
-static inline int ksft_exit_fail(void)
-{
-	exit(1);
-}
-#endif
+#include "clock-helpers.h"
+#include "kselftest.h"
 
-#define NSEC_PER_SEC 1000000000ULL
 #define CLOCK_TAI 11
 
 time_t next_leap;
@@ -190,18 +182,18 @@ int main(int argc, char **argv)
 	struct sigevent se;
 	struct sigaction act;
 	int signum = SIGRTMAX;
-	int settime = 0;
+	int settime = 1;
 	int tai_time = 0;
 	int insert = 1;
-	int iterations = -1;
+	int iterations = 10;
 	int opt;
 
 	/* Process arguments */
-	while ((opt = getopt(argc, argv, "sti:")) != -1) {
+	while ((opt = getopt(argc, argv, "wti:")) != -1) {
 		switch (opt) {
-		case 's':
-			printf("Setting time to speed up testing\n");
-			settime = 1;
+		case 'w':
+			printf("Only setting leap-flag, not changing time. It could take up to a day for leap to trigger.\n");
+			settime = 0;
 			break;
 		case 'i':
 			iterations = atoi(optarg);
@@ -210,9 +202,10 @@ int main(int argc, char **argv)
 			tai_time = 1;
 			break;
 		default:
-			printf("Usage: %s [-s] [-i <iterations>]\n", argv[0]);
-			printf("	-s: Set time to right before leap second each iteration\n");
-			printf("	-i: Number of iterations\n");
+			printf("Usage: %s [-w] [-i <iterations>]\n", argv[0]);
+			printf("	-w: Set flag and wait for leap second each iteration");
+			printf("	    (default sets time to right before leapsecond)\n");
+			printf("	-i: Number of iterations (-1 = infinite, default is 10)\n");
 			printf("	-t: Print TAI time\n");
 			exit(-1);
 		}
@@ -278,7 +271,7 @@ int main(int argc, char **argv)
 		if (ret < 0) {
 			printf("Error: Problem setting STA_INS/STA_DEL!: %s\n",
 							time_state_str(ret));
-			return ksft_exit_fail();
+			ksft_exit_fail();
 		}
 
 		/* Validate STA_INS was set */
@@ -287,7 +280,7 @@ int main(int argc, char **argv)
 		if (tx.status != STA_INS && tx.status != STA_DEL) {
 			printf("Error: STA_INS/STA_DEL not set!: %s\n",
 							time_state_str(ret));
-			return ksft_exit_fail();
+			ksft_exit_fail();
 		}
 
 		if (tai_time) {
@@ -305,7 +298,7 @@ int main(int argc, char **argv)
 		se.sigev_value.sival_int = 0;
 		if (timer_create(CLOCK_REALTIME, &se, &tm1) == -1) {
 			printf("Error: timer_create failed\n");
-			return ksft_exit_fail();
+			ksft_exit_fail();
 		}
 		its1.it_value.tv_sec = next_leap;
 		its1.it_value.tv_nsec = 0;
@@ -376,7 +369,7 @@ int main(int argc, char **argv)
 		if (error_found) {
 			printf("Errors observed\n");
 			clear_time_state();
-			return ksft_exit_fail();
+			ksft_exit_fail();
 		}
 		printf("\n");
 		if ((iterations != -1) && !(--iterations))
@@ -384,5 +377,5 @@ int main(int argc, char **argv)
 	}
 
 	clear_time_state();
-	return ksft_exit_pass();
+	ksft_exit_pass();
 }

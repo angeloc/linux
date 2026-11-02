@@ -1,16 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2015 Vladimir Zapolskiy <vz@mleia.com>
- *
- * The code contained herein is licensed under the GNU General Public
- * License. You may obtain a copy of the GNU General Public License
- * Version 2 or later at the following locations:
- *
- * http://www.opensource.org/licenses/gpl-license.html
- * http://www.gnu.org/copyleft/gpl.html
  */
 
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/io.h>
 #include <linux/of_address.h>
 #include <linux/regmap.h>
 
@@ -66,13 +61,13 @@
 #define LPC32XX_USB_CLK_CTRL		0xF4
 #define LPC32XX_USB_CLK_STS		0xF8
 
-static struct regmap_config lpc32xx_scb_regmap_config = {
+static const struct regmap_config lpc32xx_scb_regmap_config = {
+	.name = "scb",
 	.reg_bits = 32,
 	.val_bits = 32,
 	.reg_stride = 4,
 	.val_format_endian = REGMAP_ENDIAN_LITTLE,
 	.max_register = 0x114,
-	.fast_io = true,
 };
 
 static struct regmap *clk_regmap;
@@ -526,7 +521,7 @@ static unsigned long clk_pll_recalc_rate(struct clk_hw *hw,
 	    !(pll_is_valid(parent_rate, 1, 1000000, 20000000)
 	      && pll_is_valid(cco_rate, 1, 156000000, 320000000)
 	      && pll_is_valid(ref_rate, 1, 1000000, 27000000)))
-		pr_err("%s: PLL clocks are not in valid ranges: %lu/%lu/%lu",
+		pr_err("%s: PLL clocks are not in valid ranges: %lu/%lu/%lu\n",
 		       clk_hw_get_name(hw),
 		       parent_rate, cco_rate, ref_rate);
 
@@ -583,17 +578,17 @@ static int clk_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 	return regmap_update_bits(clk_regmap, clk->reg, 0x1FFFF, val);
 }
 
-static long clk_hclk_pll_round_rate(struct clk_hw *hw, unsigned long rate,
-				    unsigned long *parent_rate)
+static int clk_hclk_pll_determine_rate(struct clk_hw *hw,
+				       struct clk_rate_request *req)
 {
 	struct lpc32xx_pll_clk *clk = to_lpc32xx_pll_clk(hw);
-	u64 m_i, o = rate, i = *parent_rate, d = (u64)rate << 6;
+	u64 m_i, o = req->rate, i = req->best_parent_rate, d = (u64)req->rate << 6;
 	u64 m = 0, n = 0, p = 0;
 	int p_i, n_i;
 
-	pr_debug("%s: %lu/%lu\n", clk_hw_get_name(hw), *parent_rate, rate);
+	pr_debug("%s: %lu/%lu\n", clk_hw_get_name(hw), req->best_parent_rate, req->rate);
 
-	if (rate > 266500000)
+	if (req->rate > 266500000)
 		return -EINVAL;
 
 	/* Have to check all 20 possibilities to find the minimal M */
@@ -618,9 +613,9 @@ static long clk_hclk_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 		}
 	}
 
-	if (d == (u64)rate << 6) {
+	if (d == (u64)req->rate << 6) {
 		pr_err("%s: %lu: no valid PLL parameters are found\n",
-		       clk_hw_get_name(hw), rate);
+		       clk_hw_get_name(hw), req->rate);
 		return -EINVAL;
 	}
 
@@ -638,22 +633,25 @@ static long clk_hclk_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 
 	if (!d)
 		pr_debug("%s: %lu: found exact match: %llu/%llu/%llu\n",
-			 clk_hw_get_name(hw), rate, m, n, p);
+			 clk_hw_get_name(hw), req->rate, m, n, p);
 	else
 		pr_debug("%s: %lu: found closest: %llu/%llu/%llu - %llu\n",
-			 clk_hw_get_name(hw), rate, m, n, p, o);
+			 clk_hw_get_name(hw), req->rate, m, n, p, o);
 
-	return o;
+	req->rate = o;
+
+	return 0;
 }
 
-static long clk_usb_pll_round_rate(struct clk_hw *hw, unsigned long rate,
-				   unsigned long *parent_rate)
+static int clk_usb_pll_determine_rate(struct clk_hw *hw,
+				      struct clk_rate_request *req)
 {
 	struct lpc32xx_pll_clk *clk = to_lpc32xx_pll_clk(hw);
 	struct clk_hw *usb_div_hw, *osc_hw;
 	u64 d_i, n_i, m, o;
 
-	pr_debug("%s: %lu/%lu\n", clk_hw_get_name(hw), *parent_rate, rate);
+	pr_debug("%s: %lu/%lu\n", clk_hw_get_name(hw), req->best_parent_rate,
+		 req->rate);
 
 	/*
 	 * The only supported USB clock is 48MHz, with PLL internal constraints
@@ -661,7 +659,7 @@ static long clk_usb_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 	 * and post-divider must be 4, this slightly simplifies calculation of
 	 * USB divider, USB PLL N and M parameters.
 	 */
-	if (rate != 48000000)
+	if (req->rate != 48000000)
 		return -EINVAL;
 
 	/* USB divider clock */
@@ -689,30 +687,30 @@ static long clk_usb_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 			clk->m_div = m;
 			clk->p_div = 2;
 			clk->mode = PLL_NON_INTEGER;
-			*parent_rate = div64_u64(o, d_i);
+			req->best_parent_rate = div64_u64(o, d_i);
 
-			return rate;
+			return 0;
 		}
 	}
 
 	return -EINVAL;
 }
 
-#define LPC32XX_DEFINE_PLL_OPS(_name, _rc, _sr, _rr)			\
+#define LPC32XX_DEFINE_PLL_OPS(_name, _rc, _sr, _dr)			\
 	static const struct clk_ops clk_ ##_name ## _ops = {		\
 		.enable = clk_pll_enable,				\
 		.disable = clk_pll_disable,				\
 		.is_enabled = clk_pll_is_enabled,			\
 		.recalc_rate = _rc,					\
 		.set_rate = _sr,					\
-		.round_rate = _rr,					\
+		.determine_rate = _dr,					\
 	}
 
 LPC32XX_DEFINE_PLL_OPS(pll_397x, clk_pll_397x_recalc_rate, NULL, NULL);
 LPC32XX_DEFINE_PLL_OPS(hclk_pll, clk_pll_recalc_rate,
-		       clk_pll_set_rate, clk_hclk_pll_round_rate);
+		       clk_pll_set_rate, clk_hclk_pll_determine_rate);
 LPC32XX_DEFINE_PLL_OPS(usb_pll,  clk_pll_recalc_rate,
-		       clk_pll_set_rate, clk_usb_pll_round_rate);
+		       clk_pll_set_rate, clk_usb_pll_determine_rate);
 
 static int clk_ddram_is_enabled(struct clk_hw *hw)
 {
@@ -885,7 +883,7 @@ static const struct clk_ops clk_usb_i2c_ops = {
 	.recalc_rate = clk_usb_i2c_recalc_rate,
 };
 
-static int clk_gate_enable(struct clk_hw *hw)
+static int lpc32xx_clk_gate_enable(struct clk_hw *hw)
 {
 	struct lpc32xx_clk_gate *clk = to_lpc32xx_gate(hw);
 	u32 mask = BIT(clk->bit_idx);
@@ -894,7 +892,7 @@ static int clk_gate_enable(struct clk_hw *hw)
 	return regmap_update_bits(clk_regmap, clk->reg, mask, val);
 }
 
-static void clk_gate_disable(struct clk_hw *hw)
+static void lpc32xx_clk_gate_disable(struct clk_hw *hw)
 {
 	struct lpc32xx_clk_gate *clk = to_lpc32xx_gate(hw);
 	u32 mask = BIT(clk->bit_idx);
@@ -903,7 +901,7 @@ static void clk_gate_disable(struct clk_hw *hw)
 	regmap_update_bits(clk_regmap, clk->reg, mask, val);
 }
 
-static int clk_gate_is_enabled(struct clk_hw *hw)
+static int lpc32xx_clk_gate_is_enabled(struct clk_hw *hw)
 {
 	struct lpc32xx_clk_gate *clk = to_lpc32xx_gate(hw);
 	u32 val;
@@ -916,9 +914,9 @@ static int clk_gate_is_enabled(struct clk_hw *hw)
 }
 
 static const struct clk_ops lpc32xx_clk_gate_ops = {
-	.enable = clk_gate_enable,
-	.disable = clk_gate_disable,
-	.is_enabled = clk_gate_is_enabled,
+	.enable = lpc32xx_clk_gate_enable,
+	.disable = lpc32xx_clk_gate_disable,
+	.is_enabled = lpc32xx_clk_gate_is_enabled,
 };
 
 #define div_mask(width)	((1 << (width)) - 1)
@@ -956,11 +954,11 @@ static unsigned long clk_divider_recalc_rate(struct clk_hw *hw,
 	val &= div_mask(divider->width);
 
 	return divider_recalc_rate(hw, parent_rate, val, divider->table,
-				   divider->flags);
+				   divider->flags, divider->width);
 }
 
-static long clk_divider_round_rate(struct clk_hw *hw, unsigned long rate,
-				unsigned long *prate)
+static int clk_divider_determine_rate(struct clk_hw *hw,
+				      struct clk_rate_request *req)
 {
 	struct lpc32xx_clk_div *divider = to_lpc32xx_div(hw);
 	unsigned int bestdiv;
@@ -972,11 +970,13 @@ static long clk_divider_round_rate(struct clk_hw *hw, unsigned long rate,
 		bestdiv &= div_mask(divider->width);
 		bestdiv = _get_div(divider->table, bestdiv, divider->flags,
 			divider->width);
-		return DIV_ROUND_UP(*prate, bestdiv);
+		req->rate = DIV_ROUND_UP(req->best_parent_rate, bestdiv);
+
+		return 0;
 	}
 
-	return divider_round_rate(hw, rate, prate, divider->table,
-				  divider->width, divider->flags);
+	return divider_determine_rate(hw, req, divider->table, divider->width,
+				      divider->flags);
 }
 
 static int clk_divider_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -995,7 +995,7 @@ static int clk_divider_set_rate(struct clk_hw *hw, unsigned long rate,
 
 static const struct clk_ops lpc32xx_clk_divider_ops = {
 	.recalc_rate = clk_divider_recalc_rate,
-	.round_rate = clk_divider_round_rate,
+	.determine_rate = clk_divider_determine_rate,
 	.set_rate = clk_divider_set_rate,
 };
 
@@ -1084,13 +1084,12 @@ struct clk_hw_proto {
 	};
 };
 
-#define LPC32XX_DEFINE_FIXED(_idx, _rate, _flags)			\
+#define LPC32XX_DEFINE_FIXED(_idx, _rate)			\
 [CLK_PREFIX(_idx)] = {							\
 	.type = CLK_FIXED,						\
 	{								\
 		.f = {							\
 			.fixed_rate = (_rate),				\
-			.flags = (_flags),				\
 		},							\
 	},								\
 }
@@ -1224,7 +1223,7 @@ struct clk_hw_proto {
 }
 
 static struct clk_hw_proto clk_hw_proto[LPC32XX_CLK_HW_MAX] = {
-	LPC32XX_DEFINE_FIXED(RTC, 32768, 0),
+	LPC32XX_DEFINE_FIXED(RTC, 32768),
 	LPC32XX_DEFINE_PLL(PLL397X, pll_397x, HCLKPLL_CTRL, BIT(1)),
 	LPC32XX_DEFINE_PLL(HCLK_PLL, hclk_pll, HCLKPLL_CTRL, PLL_CTRL_ENABLE),
 	LPC32XX_DEFINE_PLL(USB_PLL, usb_pll, USB_CTRL, PLL_CTRL_ENABLE),
@@ -1282,13 +1281,13 @@ static struct clk_hw_proto clk_hw_proto[LPC32XX_CLK_HW_MAX] = {
 
 	LPC32XX_DEFINE_MUX(PWM1_MUX, PWMCLK_CTRL, 1, 0x1, NULL, 0),
 	LPC32XX_DEFINE_DIV(PWM1_DIV, PWMCLK_CTRL, 4, 4, NULL,
-			   CLK_DIVIDER_ONE_BASED | CLK_DIVIDER_ALLOW_ZERO),
+			   CLK_DIVIDER_ONE_BASED),
 	LPC32XX_DEFINE_GATE(PWM1_GATE, PWMCLK_CTRL, 0, 0),
 	LPC32XX_DEFINE_COMPOSITE(PWM1, PWM1_MUX, PWM1_DIV, PWM1_GATE),
 
 	LPC32XX_DEFINE_MUX(PWM2_MUX, PWMCLK_CTRL, 3, 0x1, NULL, 0),
 	LPC32XX_DEFINE_DIV(PWM2_DIV, PWMCLK_CTRL, 8, 4, NULL,
-			   CLK_DIVIDER_ONE_BASED | CLK_DIVIDER_ALLOW_ZERO),
+			   CLK_DIVIDER_ONE_BASED),
 	LPC32XX_DEFINE_GATE(PWM2_GATE, PWMCLK_CTRL, 2, 0),
 	LPC32XX_DEFINE_COMPOSITE(PWM2, PWM2_MUX, PWM2_DIV, PWM2_GATE),
 
@@ -1335,8 +1334,7 @@ static struct clk_hw_proto clk_hw_proto[LPC32XX_CLK_HW_MAX] = {
 	LPC32XX_DEFINE_GATE(USB_DIV_GATE, USB_CTRL, 17, 0),
 	LPC32XX_DEFINE_COMPOSITE(USB_DIV, _NULL, USB_DIV_DIV, USB_DIV_GATE),
 
-	LPC32XX_DEFINE_DIV(SD_DIV, MS_CTRL, 0, 4, NULL,
-			   CLK_DIVIDER_ONE_BASED | CLK_DIVIDER_ALLOW_ZERO),
+	LPC32XX_DEFINE_DIV(SD_DIV, MS_CTRL, 0, 4, NULL, CLK_DIVIDER_ONE_BASED),
 	LPC32XX_DEFINE_CLK(SD_GATE, MS_CTRL, BIT(5) | BIT(9), BIT(5) | BIT(9),
 			   0x0, BIT(5) | BIT(9), 0x0, 0x0, clk_mask_ops),
 	LPC32XX_DEFINE_COMPOSITE(SD, _NULL, SD_DIV, SD_GATE),
@@ -1468,7 +1466,7 @@ static struct clk * __init lpc32xx_clk_register(u32 id)
 		struct clk_fixed_rate *fixed = &clk_hw->f;
 
 		clk = clk_register_fixed_rate(NULL, lpc32xx_clk->name,
-			parents[0], fixed->flags, fixed->fixed_rate);
+			parents[0], 0, fixed->fixed_rate);
 		break;
 	}
 	default:
@@ -1476,6 +1474,20 @@ static struct clk * __init lpc32xx_clk_register(u32 id)
 	}
 
 	return clk;
+}
+
+static void __init lpc32xx_clk_div_quirk(u32 reg, u32 div_mask, u32 gate)
+{
+	u32 val;
+
+	regmap_read(clk_regmap, reg, &val);
+
+	if (!(val & div_mask)) {
+		val &= ~gate;
+		val |= BIT(__ffs(div_mask));
+	}
+
+	regmap_update_bits(clk_regmap, reg, gate | div_mask, val);
 }
 
 static void __init lpc32xx_clk_init(struct device_node *np)
@@ -1492,7 +1504,7 @@ static void __init lpc32xx_clk_init(struct device_node *np)
 		return;
 	}
 	if (clk_get_rate(clk_32k) != 32768) {
-		pr_err("invalid clock rate of external 32KHz oscillator");
+		pr_err("invalid clock rate of external 32KHz oscillator\n");
 		return;
 	}
 
@@ -1513,8 +1525,20 @@ static void __init lpc32xx_clk_init(struct device_node *np)
 	if (IS_ERR(clk_regmap)) {
 		pr_err("failed to regmap system control block: %ld\n",
 			PTR_ERR(clk_regmap));
+		iounmap(base);
 		return;
 	}
+
+	/*
+	 * Divider part of PWM and MS clocks requires a quirk to avoid
+	 * a misinterpretation of formally valid zero value in register
+	 * bitfield, which indicates another clock gate. Instead of
+	 * adding complexity to a gate clock ensure that zero value in
+	 * divider clock is never met in runtime.
+	 */
+	lpc32xx_clk_div_quirk(LPC32XX_CLKPWR_PWMCLK_CTRL, 0xf0, BIT(0));
+	lpc32xx_clk_div_quirk(LPC32XX_CLKPWR_PWMCLK_CTRL, 0xf00, BIT(2));
+	lpc32xx_clk_div_quirk(LPC32XX_CLKPWR_MS_CTRL, 0xf, BIT(5) | BIT(9));
 
 	for (i = 1; i < LPC32XX_CLK_MAX; i++) {
 		clk[i] = lpc32xx_clk_register(i);

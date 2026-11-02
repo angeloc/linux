@@ -1,22 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * w1_netlink.c
- *
  * Copyright (c) 2003 Evgeniy Polyakov <zbr@ioremap.net>
- *
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/slab.h>
@@ -24,13 +8,10 @@
 #include <linux/netlink.h>
 #include <linux/connector.h>
 
-#include "w1.h"
-#include "w1_log.h"
+#include "w1_internal.h"
 #include "w1_netlink.h"
 
 #if defined(CONFIG_W1_CON) && (defined(CONFIG_CONNECTOR) || (defined(CONFIG_CONNECTOR_MODULE) && defined(CONFIG_W1_MODULE)))
-
-#define MIN(a, b)                   (((a) < (b)) ? (a) : (b))
 
 /* Bundle together everything required to process a request in one memory
  * allocation.
@@ -84,7 +65,8 @@ static void w1_unref_block(struct w1_cb_block *block)
 		u16 len = w1_reply_len(block);
 		if (len) {
 			cn_netlink_send_mult(block->first_cn, len,
-				block->portid, 0, GFP_KERNEL);
+					     block->portid, 0,
+					     GFP_KERNEL, NULL, NULL);
 		}
 		kfree(block);
 	}
@@ -102,7 +84,8 @@ static void w1_reply_make_space(struct w1_cb_block *block, u16 space)
 {
 	u16 len = w1_reply_len(block);
 	if (len + space >= block->maxlen) {
-		cn_netlink_send_mult(block->first_cn, len, block->portid, 0, GFP_KERNEL);
+		cn_netlink_send_mult(block->first_cn, len, block->portid,
+				     0, GFP_KERNEL, NULL, NULL);
 		block->first_cn->len = 0;
 		block->cn = NULL;
 		block->msg = NULL;
@@ -211,16 +194,16 @@ static void w1_netlink_queue_status(struct w1_cb_block *block,
 static void w1_netlink_send_error(struct cn_msg *cn, struct w1_netlink_msg *msg,
 	int portid, int error)
 {
-	struct {
-		struct cn_msg cn;
-		struct w1_netlink_msg msg;
-	} packet;
-	memcpy(&packet.cn, cn, sizeof(packet.cn));
-	memcpy(&packet.msg, msg, sizeof(packet.msg));
-	packet.cn.len = sizeof(packet.msg);
-	packet.msg.len = 0;
-	packet.msg.status = (u8)-error;
-	cn_netlink_send(&packet.cn, portid, 0, GFP_KERNEL);
+	DEFINE_RAW_FLEX(struct cn_msg, packet, data,
+			sizeof(struct w1_netlink_msg));
+	struct w1_netlink_msg *pkt_msg = (struct w1_netlink_msg *)packet->data;
+
+	*packet = *cn;
+	*pkt_msg = *msg;
+	packet->len = sizeof(*pkt_msg);
+	pkt_msg->len = 0;
+	pkt_msg->status = (u8)-error;
+	cn_netlink_send(packet, portid, 0, GFP_KERNEL);
 }
 
 /**
@@ -232,22 +215,20 @@ static void w1_netlink_send_error(struct cn_msg *cn, struct w1_netlink_msg *msg,
  */
 void w1_netlink_send(struct w1_master *dev, struct w1_netlink_msg *msg)
 {
-	struct {
-		struct cn_msg cn;
-		struct w1_netlink_msg msg;
-	} packet;
-	memset(&packet, 0, sizeof(packet));
+	DEFINE_RAW_FLEX(struct cn_msg, packet, data,
+			sizeof(struct w1_netlink_msg));
+	struct w1_netlink_msg *pkt_msg = (struct w1_netlink_msg *)packet->data;
 
-	packet.cn.id.idx = CN_W1_IDX;
-	packet.cn.id.val = CN_W1_VAL;
+	packet->id.idx = CN_W1_IDX;
+	packet->id.val = CN_W1_VAL;
 
-	packet.cn.seq = dev->seq++;
-	packet.cn.len = sizeof(*msg);
+	packet->seq = dev->seq++;
+	packet->len = sizeof(*msg);
 
-	memcpy(&packet.msg, msg, sizeof(*msg));
-	packet.msg.len = 0;
+	*pkt_msg = *msg;
+	pkt_msg->len = 0;
 
-	cn_netlink_send(&packet.cn, 0, 0, GFP_KERNEL);
+	cn_netlink_send(packet, 0, 0, GFP_KERNEL);
 }
 
 static void w1_send_slave(struct w1_master *dev, u64 rn)
@@ -605,7 +586,7 @@ static void w1_cn_callback(struct cn_msg *cn, struct netlink_skb_parms *nsp)
 				sizeof(struct w1_netlink_msg) +
 				sizeof(struct w1_netlink_cmd));
 		}
-		reply_size = MIN(CONNECTOR_MAX_MSG_SIZE, reply_size);
+		reply_size = min(CONNECTOR_MAX_MSG_SIZE, reply_size);
 
 		/* allocate space for the block, a copy of the original message,
 		 * one node per cmd to point into the original message,
@@ -630,7 +611,8 @@ static void w1_cn_callback(struct cn_msg *cn, struct netlink_skb_parms *nsp)
 		}
 		atomic_set(&block->refcnt, 1);
 		block->portid = nsp->portid;
-		memcpy(&block->request_cn, cn, sizeof(*cn) + cn->len);
+		block->request_cn = *cn;
+		memcpy(block->request_cn.data, cn->data, cn->len);
 		node = (struct w1_cb_node *)(block->request_cn.data + cn->len);
 
 		/* Sneeky, when not bundling, reply_size is the allocated space

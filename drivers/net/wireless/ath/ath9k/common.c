@@ -18,6 +18,7 @@
  * Module for common driver code between ath9k and ath9k_htc
  */
 
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 
@@ -181,14 +182,15 @@ int ath9k_cmn_process_rate(struct ath_common *common,
 	sband = hw->wiphy->bands[band];
 
 	if (IS_CHAN_QUARTER_RATE(ah->curchan))
-		rxs->flag |= RX_FLAG_5MHZ;
+		rxs->bw = RATE_INFO_BW_5;
 	else if (IS_CHAN_HALF_RATE(ah->curchan))
-		rxs->flag |= RX_FLAG_10MHZ;
+		rxs->bw = RATE_INFO_BW_10;
 
 	if (rx_stats->rs_rate & 0x80) {
 		/* HT rate */
-		rxs->flag |= RX_FLAG_HT;
-		rxs->flag |= rx_stats->flag;
+		rxs->encoding = RX_ENC_HT;
+		rxs->enc_flags |= rx_stats->enc_flags;
+		rxs->bw = rx_stats->bw;
 		rxs->rate_idx = rx_stats->rs_rate & 0x7f;
 		return 0;
 	}
@@ -199,7 +201,7 @@ int ath9k_cmn_process_rate(struct ath_common *common,
 			return 0;
 		}
 		if (sband->bitrates[i].hw_value_short == rx_stats->rs_rate) {
-			rxs->flag |= RX_FLAG_SHORTPRE;
+			rxs->enc_flags |= RX_ENC_FLAG_SHORTPRE;
 			rxs->rate_idx = i;
 			return 0;
 		}
@@ -368,7 +370,7 @@ void ath9k_cmn_update_txpow(struct ath_hw *ah, u16 cur_txpow,
 {
 	struct ath_regulatory *reg = ath9k_hw_regulatory(ah);
 
-	if (reg->power_limit != new_txpow)
+	if (ah->curchan && reg->power_limit != new_txpow)
 		ath9k_hw_set_txpowerlimit(ah, new_txpow, false);
 
 	/* read back in case value is clamped */
@@ -401,15 +403,3 @@ void ath9k_cmn_init_crypto(struct ath_hw *ah)
 		ath_hw_keyreset(common, (u16) i);
 }
 EXPORT_SYMBOL(ath9k_cmn_init_crypto);
-
-static int __init ath9k_cmn_init(void)
-{
-	return 0;
-}
-module_init(ath9k_cmn_init);
-
-static void __exit ath9k_cmn_exit(void)
-{
-	return;
-}
-module_exit(ath9k_cmn_exit);

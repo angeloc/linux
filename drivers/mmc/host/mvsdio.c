@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Marvell MMC/SD/SDIO driver
  *
  * Authors: Maen Suleiman, Nicolas Pitre
  * Copyright (C) 2008-2009 Marvell Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -24,8 +21,8 @@
 #include <linux/mmc/host.h>
 #include <linux/mmc/slot-gpio.h>
 
-#include <asm/sizes.h>
-#include <asm/unaligned.h>
+#include <linux/sizes.h>
+#include <linux/unaligned.h>
 
 #include "mvsdio.h"
 
@@ -125,10 +122,10 @@ static int mvsd_setup_data(struct mvsd_host *host, struct mmc_data *data)
 		return 1;
 	} else {
 		dma_addr_t phys_addr;
-		int dma_dir = (data->flags & MMC_DATA_READ) ?
-			DMA_FROM_DEVICE : DMA_TO_DEVICE;
-		host->sg_frags = dma_map_sg(mmc_dev(host->mmc), data->sg,
-					    data->sg_len, dma_dir);
+
+		host->sg_frags = dma_map_sg(mmc_dev(host->mmc),
+					    data->sg, data->sg_len,
+					    mmc_get_dma_dir(data));
 		phys_addr = sg_dma_address(data->sg);
 		mvsd_write(MVSD_SYS_ADDR_LOW, (u32)phys_addr & 0xffff);
 		mvsd_write(MVSD_SYS_ADDR_HI,  (u32)phys_addr >> 16);
@@ -143,6 +140,7 @@ static void mvsd_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	struct mmc_command *cmd = mrq->cmd;
 	u32 cmdreg = 0, xfer = 0, intr = 0;
 	unsigned long flags;
+	unsigned int timeout;
 
 	BUG_ON(host->mrq != NULL);
 	host->mrq = mrq;
@@ -234,7 +232,8 @@ static void mvsd_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	mvsd_write(MVSD_NOR_INTR_EN, host->intr_en);
 	mvsd_write(MVSD_ERR_INTR_EN, 0xffff);
 
-	mod_timer(&host->timer, jiffies + 5 * HZ);
+	timeout = cmd->busy_timeout ? cmd->busy_timeout : 5000;
+	mod_timer(&host->timer, jiffies + msecs_to_jiffies(timeout));
 
 	spin_unlock_irqrestore(&host->lock, flags);
 }
@@ -293,9 +292,8 @@ static u32 mvsd_finish_data(struct mvsd_host *host, struct mmc_data *data,
 		host->pio_ptr = NULL;
 		host->pio_size = 0;
 	} else {
-		dma_unmap_sg(mmc_dev(host->mmc), data->sg, host->sg_frags,
-			     (data->flags & MMC_DATA_READ) ?
-				DMA_FROM_DEVICE : DMA_TO_DEVICE);
+		dma_unmap_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
+			     mmc_get_dma_dir(data));
 	}
 
 	if (err_status & MVSD_ERR_DATA_TIMEOUT)
@@ -466,7 +464,7 @@ static irqreturn_t mvsd_irq(int irq, void *dev)
 		struct mmc_command *cmd = mrq->cmd;
 		u32 err_status = 0;
 
-		del_timer(&host->timer);
+		timer_delete(&host->timer);
 		host->mrq = NULL;
 
 		host->intr_en &= MVSD_NOR_CARD_INT;
@@ -509,9 +507,9 @@ static irqreturn_t mvsd_irq(int irq, void *dev)
 	return IRQ_NONE;
 }
 
-static void mvsd_timeout_timer(unsigned long data)
+static void mvsd_timeout_timer(struct timer_list *t)
 {
-	struct mvsd_host *host = (struct mvsd_host *)data;
+	struct mvsd_host *host = timer_container_of(host, t, timer);
 	void __iomem *iobase = host->base;
 	struct mmc_request *mrq;
 	unsigned long flags;
@@ -698,23 +696,19 @@ static int mvsd_probe(struct platform_device *pdev)
 	struct mmc_host *mmc = NULL;
 	struct mvsd_host *host = NULL;
 	const struct mbus_dram_target_info *dram;
-	struct resource *r;
 	int ret, irq;
 
 	if (!np) {
 		dev_err(&pdev->dev, "no DT node\n");
 		return -ENODEV;
 	}
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	irq = platform_get_irq(pdev, 0);
-	if (!r || irq < 0)
-		return -ENXIO;
+	if (irq < 0)
+		return irq;
 
-	mmc = mmc_alloc_host(sizeof(struct mvsd_host), &pdev->dev);
-	if (!mmc) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	mmc = devm_mmc_alloc_host(&pdev->dev, sizeof(*host));
+	if (!mmc)
+		return -ENOMEM;
 
 	host = mmc_priv(mmc);
 	host->mmc = mmc;
@@ -723,16 +717,14 @@ static int mvsd_probe(struct platform_device *pdev)
 	/*
 	 * Some non-DT platforms do not pass a clock, and the clock
 	 * frequency is passed through platform_data. On DT platforms,
-	 * a clock must always be passed, even if there is no gatable
+	 * a clock must always be passed, even if there is no gateable
 	 * clock associated to the SDIO interface (it can simply be a
 	 * fixed rate clock).
 	 */
 	host->clk = devm_clk_get(&pdev->dev, NULL);
-	if (IS_ERR(host->clk)) {
-		dev_err(&pdev->dev, "no clock associated\n");
-		ret = -EINVAL;
-		goto out;
-	}
+	if (IS_ERR(host->clk))
+		return dev_err_probe(&pdev->dev, -EINVAL, "no clock associated\n");
+
 	clk_prepare_enable(host->clk);
 
 	mmc->ops = &mvsd_ops;
@@ -758,7 +750,7 @@ static int mvsd_probe(struct platform_device *pdev)
 
 	spin_lock_init(&host->lock);
 
-	host->base = devm_ioremap_resource(&pdev->dev, r);
+	host->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(host->base)) {
 		ret = PTR_ERR(host->base);
 		goto out;
@@ -772,12 +764,10 @@ static int mvsd_probe(struct platform_device *pdev)
 	mvsd_power_down(host);
 
 	ret = devm_request_irq(&pdev->dev, irq, mvsd_irq, 0, DRIVER_NAME, host);
-	if (ret) {
-		dev_err(&pdev->dev, "cannot assign irq %d\n", irq);
+	if (ret)
 		goto out;
-	}
 
-	setup_timer(&host->timer, mvsd_timeout_timer, (unsigned long)host);
+	timer_setup(&host->timer, mvsd_timeout_timer, 0);
 	platform_set_drvdata(pdev, mmc);
 	ret = mmc_add_host(mmc);
 	if (ret)
@@ -791,30 +781,22 @@ static int mvsd_probe(struct platform_device *pdev)
 	return 0;
 
 out:
-	if (mmc) {
-		if (!IS_ERR(host->clk))
-			clk_disable_unprepare(host->clk);
-		mmc_free_host(mmc);
-	}
-
+	clk_disable_unprepare(host->clk);
 	return ret;
 }
 
-static int mvsd_remove(struct platform_device *pdev)
+static void mvsd_remove(struct platform_device *pdev)
 {
 	struct mmc_host *mmc = platform_get_drvdata(pdev);
 
 	struct mvsd_host *host = mmc_priv(mmc);
 
 	mmc_remove_host(mmc);
-	del_timer_sync(&host->timer);
+	timer_delete_sync(&host->timer);
 	mvsd_power_down(host);
 
 	if (!IS_ERR(host->clk))
 		clk_disable_unprepare(host->clk);
-	mmc_free_host(mmc);
-
-	return 0;
 }
 
 static const struct of_device_id mvsdio_dt_ids[] = {
@@ -828,6 +810,7 @@ static struct platform_driver mvsd_driver = {
 	.remove		= mvsd_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = mvsdio_dt_ids,
 	},
 };

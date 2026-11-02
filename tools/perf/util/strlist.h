@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_STRLIST_H
 #define __PERF_STRLIST_H
 
@@ -13,7 +14,6 @@ struct str_node {
 
 struct strlist {
 	struct rblist rblist;
-	bool	      dupstr;
 	bool	      file_only;
 };
 
@@ -23,7 +23,6 @@ struct strlist {
  *             found
  */
 struct strlist_config {
-	bool dont_dupstr;
 	bool file_only;
 	const char *dirname;
 };
@@ -56,7 +55,7 @@ static inline unsigned int strlist__nr_entries(const struct strlist *slist)
 /* For strlist iteration */
 static inline struct str_node *strlist__first(struct strlist *slist)
 {
-	struct rb_node *rn = rb_first(&slist->rblist.entries);
+	struct rb_node *rn = rb_first_cached(&slist->rblist.entries);
 	return rn ? rb_entry(rn, struct str_node, rb_node) : NULL;
 }
 static inline struct str_node *strlist__next(struct str_node *sn)

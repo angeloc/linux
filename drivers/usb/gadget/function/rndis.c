@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * RNDIS MSG parser
  *
  * Authors:	Benedikt Spranger, Pengutronix
  *		Robert Schwebel, Pengutronix
- *
- *              This program is free software; you can redistribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              version 2, as published by the Free Software Foundation.
  *
  *		This software was originally developed in conformance with
  *		Microsoft's Remote NDIS Specification License Agreement.
@@ -34,7 +31,7 @@
 
 #include <asm/io.h>
 #include <asm/byteorder.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "u_rndis.h"
 
@@ -75,13 +72,12 @@ static rndis_resp_t *rndis_add_response(struct rndis_params *params,
 
 #ifdef CONFIG_USB_GADGET_DEBUG_FILES
 
-static const struct file_operations rndis_proc_fops;
+static const struct proc_ops rndis_proc_ops;
 
 #endif /* CONFIG_USB_GADGET_DEBUG_FILES */
 
 /* supported OIDs */
-static const u32 oid_supported_list[] =
-{
+static const u32 oid_supported_list[] = {
 	/* the general stuff */
 	RNDIS_OID_GEN_SUPPORTED_LIST,
 	RNDIS_OID_GEN_HARDWARE_STATUS,
@@ -474,8 +470,7 @@ static int gen_ndis_query_resp(struct rndis_params *params, u32 OID, u8 *buf,
 		break;
 
 	default:
-		pr_warning("%s: query unknown OID 0x%08X\n",
-			 __func__, OID);
+		pr_warn("%s: query unknown OID 0x%08X\n", __func__, OID);
 	}
 	if (retval < 0)
 		length = 0;
@@ -546,8 +541,8 @@ static int gen_ndis_set_resp(struct rndis_params *params, u32 OID,
 		break;
 
 	default:
-		pr_warning("%s: set unknown OID 0x%08X, size %d\n",
-			 __func__, OID, buf_len);
+		pr_warn("%s: set unknown OID 0x%08X, size %d\n",
+			__func__, OID, buf_len);
 	}
 
 	return retval;
@@ -596,12 +591,20 @@ static int rndis_init_response(struct rndis_params *params,
 static int rndis_query_response(struct rndis_params *params,
 				rndis_query_msg_type *buf)
 {
+	u32 BufLength, BufOffset;
 	rndis_query_cmplt_type *resp;
 	rndis_resp_t *r;
 
 	/* pr_debug("%s: OID = %08X\n", __func__, cpu_to_le32(buf->OID)); */
 	if (!params->dev)
 		return -ENOTSUPP;
+
+	BufLength = le32_to_cpu(buf->InformationBufferLength);
+	BufOffset = le32_to_cpu(buf->InformationBufferOffset);
+	if ((BufLength > RNDIS_MAX_TOTAL_SIZE) ||
+	    (BufOffset > RNDIS_MAX_TOTAL_SIZE) ||
+	    (BufOffset + 8 >= RNDIS_MAX_TOTAL_SIZE))
+		return -EINVAL;
 
 	/*
 	 * we need more memory:
@@ -619,10 +622,8 @@ static int rndis_query_response(struct rndis_params *params,
 	resp->RequestID = buf->RequestID; /* Still LE in msg buffer */
 
 	if (gen_ndis_query_resp(params, le32_to_cpu(buf->OID),
-			le32_to_cpu(buf->InformationBufferOffset)
-					+ 8 + (u8 *)buf,
-			le32_to_cpu(buf->InformationBufferLength),
-			r)) {
+				BufOffset + 8 + (u8 *)buf,
+				BufLength, r)) {
 		/* OID not supported */
 		resp->Status = cpu_to_le32(RNDIS_STATUS_NOT_SUPPORTED);
 		resp->MessageLength = cpu_to_le32(sizeof *resp);
@@ -642,13 +643,17 @@ static int rndis_set_response(struct rndis_params *params,
 	rndis_set_cmplt_type *resp;
 	rndis_resp_t *r;
 
+	BufLength = le32_to_cpu(buf->InformationBufferLength);
+	BufOffset = le32_to_cpu(buf->InformationBufferOffset);
+	if ((BufLength > RNDIS_MAX_TOTAL_SIZE) ||
+	    (BufOffset > RNDIS_MAX_TOTAL_SIZE) ||
+	    (BufOffset + 8 >= RNDIS_MAX_TOTAL_SIZE))
+		    return -EINVAL;
+
 	r = rndis_add_response(params, sizeof(rndis_set_cmplt_type));
 	if (!r)
 		return -ENOMEM;
 	resp = (rndis_set_cmplt_type *)r->buf;
-
-	BufLength = le32_to_cpu(buf->InformationBufferLength);
-	BufOffset = le32_to_cpu(buf->InformationBufferOffset);
 
 #ifdef	VERBOSE_DEBUG
 	pr_debug("%s: Length: %d\n", __func__, BufLength);
@@ -680,6 +685,12 @@ static int rndis_reset_response(struct rndis_params *params,
 {
 	rndis_reset_cmplt_type *resp;
 	rndis_resp_t *r;
+	u8 *xbuf;
+	u32 length;
+
+	/* drain the response queue */
+	while ((xbuf = rndis_get_next_response(params, &length)))
+		rndis_free_response(params, xbuf);
 
 	r = rndis_add_response(params, sizeof(rndis_reset_cmplt_type));
 	if (!r)
@@ -848,8 +859,11 @@ int rndis_msg_parser(struct rndis_params *params, u8 *buf)
 		 * In one case those messages seemed to relate to the host
 		 * suspending itself.
 		 */
-		pr_warning("%s: unknown RNDIS message 0x%08X len %d\n",
+		pr_warn("%s: unknown RNDIS message 0x%08X len %d\n",
 			__func__, MsgType, MsgLength);
+		/* Garbled message can be huge, so limit what we display */
+		if (MsgLength > 16)
+			MsgLength = 16;
 		print_hex_dump_bytes(__func__, DUMP_PREFIX_OFFSET,
 				     buf, MsgLength);
 		break;
@@ -861,12 +875,12 @@ EXPORT_SYMBOL_GPL(rndis_msg_parser);
 
 static inline int rndis_get_nr(void)
 {
-	return ida_simple_get(&rndis_ida, 0, 0, GFP_KERNEL);
+	return ida_alloc_max(&rndis_ida, 999, GFP_KERNEL);
 }
 
 static inline void rndis_put_nr(int nr)
 {
-	ida_simple_remove(&rndis_ida, nr);
+	ida_free(&rndis_ida, nr);
 }
 
 struct rndis_params *rndis_register(void (*resp_avail)(void *v), void *v)
@@ -884,7 +898,7 @@ struct rndis_params *rndis_register(void (*resp_avail)(void *v), void *v)
 		return ERR_PTR(-ENODEV);
 	}
 
-	params = kzalloc(sizeof(*params), GFP_KERNEL);
+	params = kzalloc_obj(*params);
 	if (!params) {
 		rndis_put_nr(i);
 
@@ -898,7 +912,7 @@ struct rndis_params *rndis_register(void (*resp_avail)(void *v), void *v)
 
 		sprintf(name, NAME_TEMPLATE, i);
 		proc_entry = proc_create_data(name, 0660, NULL,
-					      &rndis_proc_fops, params);
+					      &rndis_proc_ops, params);
 		if (!proc_entry) {
 			kfree(params);
 			rndis_put_nr(i);
@@ -915,6 +929,7 @@ struct rndis_params *rndis_register(void (*resp_avail)(void *v), void *v)
 	params->resp_avail = resp_avail;
 	params->v = v;
 	INIT_LIST_HEAD(&params->resp_queue);
+	spin_lock_init(&params->resp_lock);
 	pr_debug("%s: configNr = %d\n", __func__, i);
 
 	return params;
@@ -995,7 +1010,7 @@ void rndis_add_hdr(struct sk_buff *skb)
 
 	if (!skb)
 		return;
-	header = (void *)skb_push(skb, sizeof(*header));
+	header = skb_push(skb, sizeof(*header));
 	memset(header, 0, sizeof *header);
 	header->MessageType = cpu_to_le32(RNDIS_MSG_PACKET);
 	header->MessageLength = cpu_to_le32(skb->len);
@@ -1008,12 +1023,14 @@ void rndis_free_response(struct rndis_params *params, u8 *buf)
 {
 	rndis_resp_t *r, *n;
 
+	spin_lock(&params->resp_lock);
 	list_for_each_entry_safe(r, n, &params->resp_queue, list) {
 		if (r->buf == buf) {
 			list_del(&r->list);
 			kfree(r);
 		}
 	}
+	spin_unlock(&params->resp_lock);
 }
 EXPORT_SYMBOL_GPL(rndis_free_response);
 
@@ -1023,14 +1040,17 @@ u8 *rndis_get_next_response(struct rndis_params *params, u32 *length)
 
 	if (!length) return NULL;
 
+	spin_lock(&params->resp_lock);
 	list_for_each_entry_safe(r, n, &params->resp_queue, list) {
 		if (!r->send) {
 			r->send = 1;
 			*length = r->length;
+			spin_unlock(&params->resp_lock);
 			return r->buf;
 		}
 	}
 
+	spin_unlock(&params->resp_lock);
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(rndis_get_next_response);
@@ -1047,7 +1067,9 @@ static rndis_resp_t *rndis_add_response(struct rndis_params *params, u32 length)
 	r->length = length;
 	r->send = 0;
 
+	spin_lock(&params->resp_lock);
 	list_add_tail(&r->list, &params->resp_queue);
+	spin_unlock(&params->resp_lock);
 	return r;
 }
 
@@ -1057,6 +1079,12 @@ int rndis_rm_hdr(struct gether *port,
 {
 	/* tmp points to a struct rndis_packet_msg_type */
 	__le32 *tmp = (void *)skb->data;
+
+	/* Need at least MessageType, MessageLength, DataOffset, DataLength */
+	if (skb->len < 16) {
+		dev_kfree_skb_any(skb);
+		return -EINVAL;
+	}
 
 	/* MessageType, MessageLength */
 	if (cpu_to_le32(RNDIS_MSG_PACKET)
@@ -1089,7 +1117,7 @@ static int rndis_proc_show(struct seq_file *m, void *v)
 			 "used      : %s\n"
 			 "state     : %s\n"
 			 "medium    : 0x%08X\n"
-			 "speed     : %d\n"
+			 "speed     : %u\n"
 			 "cable     : %s\n"
 			 "vendor ID : 0x%08X\n"
 			 "vendor    : %s\n",
@@ -1113,7 +1141,7 @@ static int rndis_proc_show(struct seq_file *m, void *v)
 static ssize_t rndis_proc_write(struct file *file, const char __user *buffer,
 				size_t count, loff_t *ppos)
 {
-	rndis_params *p = PDE_DATA(file_inode(file));
+	rndis_params *p = pde_data(file_inode(file));
 	u32 speed = 0;
 	int i, fl_speed = 0;
 
@@ -1157,16 +1185,15 @@ static ssize_t rndis_proc_write(struct file *file, const char __user *buffer,
 
 static int rndis_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, rndis_proc_show, PDE_DATA(inode));
+	return single_open(file, rndis_proc_show, pde_data(inode));
 }
 
-static const struct file_operations rndis_proc_fops = {
-	.owner		= THIS_MODULE,
-	.open		= rndis_proc_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-	.write		= rndis_proc_write,
+static const struct proc_ops rndis_proc_ops = {
+	.proc_open	= rndis_proc_open,
+	.proc_read	= seq_read,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+	.proc_write	= rndis_proc_write,
 };
 
 #define	NAME_TEMPLATE "driver/rndis-%03d"

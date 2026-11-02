@@ -1,16 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MPIC timer wakeup driver
  *
  * Copyright 2013 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
  */
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
@@ -56,17 +53,16 @@ static ssize_t fsl_timer_wakeup_show(struct device *dev,
 				struct device_attribute *attr,
 				char *buf)
 {
-	struct timeval interval;
-	int val = 0;
+	time64_t interval = 0;
 
 	mutex_lock(&sysfs_lock);
 	if (fsl_wakeup->timer) {
 		mpic_get_remain_time(fsl_wakeup->timer, &interval);
-		val = interval.tv_sec + 1;
+		interval++;
 	}
 	mutex_unlock(&sysfs_lock);
 
-	return sprintf(buf, "%d\n", val);
+	return sysfs_emit(buf, "%lld\n", interval);
 }
 
 static ssize_t fsl_timer_wakeup_store(struct device *dev,
@@ -74,14 +70,13 @@ static ssize_t fsl_timer_wakeup_store(struct device *dev,
 				const char *buf,
 				size_t count)
 {
-	struct timeval interval;
+	time64_t interval;
 	int ret;
 
-	interval.tv_usec = 0;
-	if (kstrtol(buf, 0, &interval.tv_sec))
+	if (kstrtoll(buf, 0, &interval))
 		return -EINVAL;
 
-	mutex_lock(&sysfs_lock);
+	guard(mutex)(&sysfs_lock);
 
 	if (fsl_wakeup->timer) {
 		disable_irq_wake(fsl_wakeup->timer->irq);
@@ -89,30 +84,22 @@ static ssize_t fsl_timer_wakeup_store(struct device *dev,
 		fsl_wakeup->timer = NULL;
 	}
 
-	if (!interval.tv_sec) {
-		mutex_unlock(&sysfs_lock);
+	if (!interval)
 		return count;
-	}
 
 	fsl_wakeup->timer = mpic_request_timer(fsl_mpic_timer_irq,
-						fsl_wakeup, &interval);
-	if (!fsl_wakeup->timer) {
-		mutex_unlock(&sysfs_lock);
+						fsl_wakeup, interval);
+	if (!fsl_wakeup->timer)
 		return -EINVAL;
-	}
 
 	ret = enable_irq_wake(fsl_wakeup->timer->irq);
 	if (ret) {
 		mpic_free_timer(fsl_wakeup->timer);
 		fsl_wakeup->timer = NULL;
-		mutex_unlock(&sysfs_lock);
-
 		return ret;
 	}
 
 	mpic_start_timer(fsl_wakeup->timer);
-
-	mutex_unlock(&sysfs_lock);
 
 	return count;
 }
@@ -122,24 +109,35 @@ static struct device_attribute mpic_attributes = __ATTR(timer_wakeup, 0644,
 
 static int __init fsl_wakeup_sys_init(void)
 {
-	int ret;
+	struct device *dev_root;
+	int ret = -EINVAL;
 
-	fsl_wakeup = kzalloc(sizeof(struct fsl_mpic_timer_wakeup), GFP_KERNEL);
+	fsl_wakeup = kzalloc_obj(struct fsl_mpic_timer_wakeup);
 	if (!fsl_wakeup)
 		return -ENOMEM;
 
 	INIT_WORK(&fsl_wakeup->free_work, fsl_free_resource);
 
-	ret = device_create_file(mpic_subsys.dev_root, &mpic_attributes);
-	if (ret)
-		kfree(fsl_wakeup);
+	dev_root = bus_get_dev_root(&mpic_subsys);
+	if (dev_root) {
+		ret = device_create_file(dev_root, &mpic_attributes);
+		put_device(dev_root);
+		if (ret)
+			kfree(fsl_wakeup);
+	}
 
 	return ret;
 }
 
 static void __exit fsl_wakeup_sys_exit(void)
 {
-	device_remove_file(mpic_subsys.dev_root, &mpic_attributes);
+	struct device *dev_root;
+
+	dev_root = bus_get_dev_root(&mpic_subsys);
+	if (dev_root) {
+		device_remove_file(dev_root, &mpic_attributes);
+		put_device(dev_root);
+	}
 
 	mutex_lock(&sysfs_lock);
 

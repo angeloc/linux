@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2013 Emilio López <emilio@elopez.com.ar>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Adjustable factor-based clock implementation
  */
@@ -176,10 +173,10 @@ static const struct clk_ops clk_factors_ops = {
 	.set_rate = clk_factors_set_rate,
 };
 
-struct clk *sunxi_factors_register(struct device_node *node,
-				   const struct factors_data *data,
-				   spinlock_t *lock,
-				   void __iomem *reg)
+static struct clk *__sunxi_factors_register(struct device_node *node,
+					    const struct factors_data *data,
+					    spinlock_t *lock, void __iomem *reg,
+					    unsigned long flags)
 {
 	struct clk *clk;
 	struct clk_factors *factors;
@@ -203,7 +200,7 @@ struct clk *sunxi_factors_register(struct device_node *node,
 	else
 		of_property_read_string(node, "clock-output-names", &clk_name);
 
-	factors = kzalloc(sizeof(struct clk_factors), GFP_KERNEL);
+	factors = kzalloc_obj(struct clk_factors);
 	if (!factors)
 		goto err_factors;
 
@@ -216,7 +213,7 @@ struct clk *sunxi_factors_register(struct device_node *node,
 
 	/* Add a gate if this factor clock can be gated */
 	if (data->enable) {
-		gate = kzalloc(sizeof(struct clk_gate), GFP_KERNEL);
+		gate = kzalloc_obj(struct clk_gate);
 		if (!gate)
 			goto err_gate;
 
@@ -231,7 +228,7 @@ struct clk *sunxi_factors_register(struct device_node *node,
 
 	/* Add a mux if this factor clock can be muxed */
 	if (data->mux) {
-		mux = kzalloc(sizeof(struct clk_mux), GFP_KERNEL);
+		mux = kzalloc_obj(struct clk_mux);
 		if (!mux)
 			goto err_mux;
 
@@ -249,7 +246,7 @@ struct clk *sunxi_factors_register(struct device_node *node,
 			parents, i,
 			mux_hw, &clk_mux_ops,
 			&factors->hw, &clk_factors_ops,
-			gate_hw, &clk_gate_ops, 0);
+			gate_hw, &clk_gate_ops, CLK_IS_CRITICAL);
 	if (IS_ERR(clk))
 		goto err_register;
 
@@ -272,17 +269,31 @@ err_factors:
 	return NULL;
 }
 
+struct clk *sunxi_factors_register(struct device_node *node,
+				   const struct factors_data *data,
+				   spinlock_t *lock,
+				   void __iomem *reg)
+{
+	return __sunxi_factors_register(node, data, lock, reg, 0);
+}
+
+struct clk *sunxi_factors_register_critical(struct device_node *node,
+					    const struct factors_data *data,
+					    spinlock_t *lock,
+					    void __iomem *reg)
+{
+	return __sunxi_factors_register(node, data, lock, reg, CLK_IS_CRITICAL);
+}
+
 void sunxi_factors_unregister(struct device_node *node, struct clk *clk)
 {
 	struct clk_hw *hw = __clk_get_hw(clk);
 	struct clk_factors *factors;
-	const char *name;
 
 	if (!hw)
 		return;
 
 	factors = to_clk_factors(hw);
-	name = clk_hw_get_name(hw);
 
 	of_clk_del_provider(node);
 	/* TODO: The composite clock stuff will leak a bit here. */

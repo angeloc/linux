@@ -1,20 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Alchemy DB/PB1xxx board support.
  */
 
+#include <asm/prom.h>
 #include <asm/mach-au1x00/au1000.h>
 #include <asm/mach-db1x00/bcsr.h>
 
-int __init db1000_board_setup(void);
-int __init db1000_dev_setup(void);
-int __init db1500_pci_setup(void);
-int __init db1200_board_setup(void);
-int __init db1200_dev_setup(void);
-int __init db1300_board_setup(void);
-int __init db1300_dev_setup(void);
-int __init db1550_board_setup(void);
-int __init db1550_dev_setup(void);
-int __init db1550_pci_setup(int);
+#include "db1xxx.h"
 
 static const char *board_type_str(void)
 {
@@ -97,6 +90,7 @@ arch_initcall(db1xxx_arch_init);
 
 static int __init db1xxx_dev_init(void)
 {
+	mips_set_machine_name(board_type_str());
 	switch (BCSR_WHOAMI_BOARD(bcsr_read(BCSR_WHOAMI))) {
 	case BCSR_WHOAMI_DB1000:
 	case BCSR_WHOAMI_DB1500:

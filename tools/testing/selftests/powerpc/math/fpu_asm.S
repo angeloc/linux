@@ -1,77 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright 2015, Cyril Bur, IBM Corp.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
-#include "../basic_asm.h"
-
-#define PUSH_FPU(pos) \
-	stfd	f14,pos(sp); \
-	stfd	f15,pos+8(sp); \
-	stfd	f16,pos+16(sp); \
-	stfd	f17,pos+24(sp); \
-	stfd	f18,pos+32(sp); \
-	stfd	f19,pos+40(sp); \
-	stfd	f20,pos+48(sp); \
-	stfd	f21,pos+56(sp); \
-	stfd	f22,pos+64(sp); \
-	stfd	f23,pos+72(sp); \
-	stfd	f24,pos+80(sp); \
-	stfd	f25,pos+88(sp); \
-	stfd	f26,pos+96(sp); \
-	stfd	f27,pos+104(sp); \
-	stfd	f28,pos+112(sp); \
-	stfd	f29,pos+120(sp); \
-	stfd	f30,pos+128(sp); \
-	stfd	f31,pos+136(sp);
-
-#define POP_FPU(pos) \
-	lfd	f14,pos(sp); \
-	lfd	f15,pos+8(sp); \
-	lfd	f16,pos+16(sp); \
-	lfd	f17,pos+24(sp); \
-	lfd	f18,pos+32(sp); \
-	lfd	f19,pos+40(sp); \
-	lfd	f20,pos+48(sp); \
-	lfd	f21,pos+56(sp); \
-	lfd	f22,pos+64(sp); \
-	lfd	f23,pos+72(sp); \
-	lfd	f24,pos+80(sp); \
-	lfd	f25,pos+88(sp); \
-	lfd	f26,pos+96(sp); \
-	lfd	f27,pos+104(sp); \
-	lfd	f28,pos+112(sp); \
-	lfd	f29,pos+120(sp); \
-	lfd	f30,pos+128(sp); \
-	lfd	f31,pos+136(sp);
-
-# Careful calling this, it will 'clobber' fpu (by design)
-# Don't call this from C
-FUNC_START(load_fpu)
-	lfd	f14,0(r3)
-	lfd	f15,8(r3)
-	lfd	f16,16(r3)
-	lfd	f17,24(r3)
-	lfd	f18,32(r3)
-	lfd	f19,40(r3)
-	lfd	f20,48(r3)
-	lfd	f21,56(r3)
-	lfd	f22,64(r3)
-	lfd	f23,72(r3)
-	lfd	f24,80(r3)
-	lfd	f25,88(r3)
-	lfd	f26,96(r3)
-	lfd	f27,104(r3)
-	lfd	f28,112(r3)
-	lfd	f29,120(r3)
-	lfd	f30,128(r3)
-	lfd	f31,136(r3)
-	blr
-FUNC_END(load_fpu)
+#include "basic_asm.h"
+#include "fpu_asm.h"
 
 FUNC_START(check_fpu)
 	mr r4,r3
@@ -133,17 +66,52 @@ FUNC_START(check_fpu)
 	li	r3,0 # Success!!!
 1:	blr
 
+
+// int check_all_fprs(double darray[32])
+FUNC_START(check_all_fprs)
+	PUSH_BASIC_STACK(8)
+	mr	r4, r3	// r4 = darray
+	li	r3, 1	// prepare for failure
+
+	stfd	f31, STACK_FRAME_LOCAL(0, 0)(sp) // backup f31
+
+	// Check regs f0-f30, using f31 as scratch
+	.set i, 0
+	.rept 31
+	lfd	f31, (8 * i)(r4)	// load expected value
+	fcmpu	cr0, i, f31		// compare
+	bne	cr0, 1f			// bail if mismatch
+	.set i, i + 1
+	.endr
+
+	lfd	f31, STACK_FRAME_LOCAL(0, 0)(sp) // reload f31
+	stfd	f30, STACK_FRAME_LOCAL(0, 0)(sp) // backup f30
+
+	lfd	f30, (8 * 31)(r4)	// load expected value of f31
+	fcmpu	cr0, f30, f31		// compare
+	bne	cr0, 1f			// bail if mismatch
+
+	lfd	f30, STACK_FRAME_LOCAL(0, 0)(sp) // reload f30
+
+	// Success
+	li	r3, 0
+
+1:	POP_BASIC_STACK(8)
+	blr
+FUNC_END(check_all_fprs)
+
 FUNC_START(test_fpu)
 	# r3 holds pointer to where to put the result of fork
 	# r4 holds pointer to the pid
 	# f14-f31 are non volatiles
 	PUSH_BASIC_STACK(256)
+	PUSH_FPU(256)
 	std	r3,STACK_FRAME_PARAM(0)(sp) # Address of darray
 	std r4,STACK_FRAME_PARAM(1)(sp) # Address of pid
-	PUSH_FPU(STACK_FRAME_LOCAL(2,0))
 
-	bl load_fpu
-	nop
+	// Load FPRs with expected values
+	OP_REGS lfd, 8, 0, 31, r3
+
 	li	r0,__NR_fork
 	sc
 
@@ -152,10 +120,10 @@ FUNC_START(test_fpu)
 	std	r3,0(r9)
 
 	ld r3,STACK_FRAME_PARAM(0)(sp)
-	bl check_fpu
+	bl check_all_fprs
 	nop
 
-	POP_FPU(STACK_FRAME_LOCAL(2,0))
+	POP_FPU(256)
 	POP_BASIC_STACK(256)
 	blr
 FUNC_END(test_fpu)
@@ -166,13 +134,13 @@ FUNC_END(test_fpu)
 # registers while running is not zero.
 FUNC_START(preempt_fpu)
 	PUSH_BASIC_STACK(256)
+	PUSH_FPU(256)
 	std r3,STACK_FRAME_PARAM(0)(sp) # double *darray
 	std r4,STACK_FRAME_PARAM(1)(sp) # int *threads_starting
 	std r5,STACK_FRAME_PARAM(2)(sp) # int *running
-	PUSH_FPU(STACK_FRAME_LOCAL(3,0))
 
-	bl load_fpu
-	nop
+	// Load FPRs with expected values
+	OP_REGS lfd, 8, 0, 31, r3
 
 	sync
 	# Atomic DEC
@@ -183,8 +151,7 @@ FUNC_START(preempt_fpu)
 	bne- 1b
 
 2:	ld r3,STACK_FRAME_PARAM(0)(sp)
-	bl check_fpu
-	nop
+	bl check_all_fprs
 	cmpdi r3,0
 	bne 3f
 	ld r4,STACK_FRAME_PARAM(2)(sp)
@@ -192,7 +159,7 @@ FUNC_START(preempt_fpu)
 	cmpwi r5,0
 	bne 2b
 
-3:	POP_FPU(STACK_FRAME_LOCAL(3,0))
+3:	POP_FPU(256)
 	POP_BASIC_STACK(256)
 	blr
 FUNC_END(preempt_fpu)

@@ -1,26 +1,10 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
  * inode.h
  *
  * Function prototypes
  *
  * Copyright (C) 2002, 2004 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #ifndef OCFS2_INODE_H
@@ -81,7 +65,7 @@ struct ocfs2_inode_info
 	tid_t i_sync_tid;
 	tid_t i_datasync_tid;
 
-	struct dquot *i_dquot[MAXQUOTAS];
+	struct dquot __rcu *i_dquot[MAXQUOTAS];
 };
 
 /*
@@ -123,8 +107,6 @@ static inline struct ocfs2_inode_info *OCFS2_I(struct inode *inode)
 #define INODE_JOURNAL(i) (OCFS2_I(i)->ip_flags & OCFS2_INODE_JOURNAL)
 #define SET_INODE_JOURNAL(i) (OCFS2_I(i)->ip_flags |= OCFS2_INODE_JOURNAL)
 
-extern struct kmem_cache *ocfs2_inode_cache;
-
 extern const struct address_space_operations ocfs2_aops;
 extern const struct ocfs2_caching_operations ocfs2_inode_caching_ops;
 
@@ -134,7 +116,6 @@ static inline struct ocfs2_caching_info *INODE_CACHE(struct inode *inode)
 }
 
 void ocfs2_evict_inode(struct inode *inode);
-int ocfs2_drop_inode(struct inode *inode);
 
 /* Flags for ocfs2_iget() */
 #define OCFS2_FI_FLAG_SYSFILE		0x1
@@ -181,6 +162,12 @@ int ocfs2_read_inode_block_full(struct inode *inode, struct buffer_head **bh,
 static inline struct ocfs2_inode_info *cache_info_to_inode(struct ocfs2_caching_info *ci)
 {
 	return container_of(ci, struct ocfs2_inode_info, ip_metadata_cache);
+}
+
+/* Does this inode have the reflink flag set? */
+static inline bool ocfs2_is_refcount_inode(struct inode *inode)
+{
+	return (OCFS2_I(inode)->ip_dyn_features & OCFS2_HAS_REFCOUNT_FL);
 }
 
 #endif /* OCFS2_INODE_H */

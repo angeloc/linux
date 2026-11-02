@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _SPARC64_TLBFLUSH_H
 #define _SPARC64_TLBFLUSH_H
 
@@ -8,16 +9,16 @@
 #define TLB_BATCH_NR	192
 
 struct tlb_batch {
-	bool huge;
+	unsigned int hugepage_shift;
 	struct mm_struct *mm;
 	unsigned long tlb_nr;
-	unsigned long active;
 	unsigned long vaddrs[TLB_BATCH_NR];
 };
 
 void flush_tsb_kernel_range(unsigned long start, unsigned long end);
 void flush_tsb_user(struct tlb_batch *tb);
-void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr, bool huge);
+void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr,
+			 unsigned int hugepage_shift);
 
 /* TLB flush operations. */
 
@@ -37,12 +38,10 @@ static inline void flush_tlb_range(struct vm_area_struct *vma,
 
 void flush_tlb_kernel_range(unsigned long start, unsigned long end);
 
-#define __HAVE_ARCH_ENTER_LAZY_MMU_MODE
-
 void flush_tlb_pending(void);
 void arch_enter_lazy_mmu_mode(void);
+void arch_flush_lazy_mmu_mode(void);
 void arch_leave_lazy_mmu_mode(void);
-#define arch_flush_lazy_mmu_mode()      do {} while (0)
 
 /* Local cpu only.  */
 void __flush_tlb_all(void);

@@ -1,16 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Clock implementation for VIA/Wondermedia SoC's
  * Copyright (C) 2012 Tony Prisk <linux@prisktech.co.nz>
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/io.h>
@@ -137,30 +128,31 @@ static unsigned long vt8500_dclk_recalc_rate(struct clk_hw *hw,
 	return parent_rate / div;
 }
 
-static long vt8500_dclk_round_rate(struct clk_hw *hw, unsigned long rate,
-				unsigned long *prate)
+static int vt8500_dclk_determine_rate(struct clk_hw *hw,
+				      struct clk_rate_request *req)
 {
 	struct clk_device *cdev = to_clk_device(hw);
 	u32 divisor;
 
-	if (rate == 0)
+	if (req->rate == 0)
 		return 0;
 
-	divisor = *prate / rate;
+	divisor = req->best_parent_rate / req->rate;
 
 	/* If prate / rate would be decimal, incr the divisor */
-	if (rate * divisor < *prate)
+	if (req->rate * divisor < req->best_parent_rate)
 		divisor++;
 
 	/*
 	 * If this is a request for SDMMC we have to adjust the divisor
 	 * when >31 to use the fixed predivisor
 	 */
-	if ((cdev->div_mask == 0x3F) && (divisor > 31)) {
+	if ((cdev->div_mask == 0x3F) && (divisor > 31))
 		divisor = 64 * ((divisor / 64) + 1);
-	}
 
-	return *prate / divisor;
+	req->rate = req->best_parent_rate / divisor;
+
+	return 0;
 }
 
 static int vt8500_dclk_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -211,7 +203,7 @@ static const struct clk_ops vt8500_gated_clk_ops = {
 };
 
 static const struct clk_ops vt8500_divisor_clk_ops = {
-	.round_rate = vt8500_dclk_round_rate,
+	.determine_rate = vt8500_dclk_determine_rate,
 	.set_rate = vt8500_dclk_set_rate,
 	.recalc_rate = vt8500_dclk_recalc_rate,
 };
@@ -220,7 +212,7 @@ static const struct clk_ops vt8500_gated_divisor_clk_ops = {
 	.enable = vt8500_dclk_enable,
 	.disable = vt8500_dclk_disable,
 	.is_enabled = vt8500_dclk_is_enabled,
-	.round_rate = vt8500_dclk_round_rate,
+	.determine_rate = vt8500_dclk_determine_rate,
 	.set_rate = vt8500_dclk_set_rate,
 	.recalc_rate = vt8500_dclk_recalc_rate,
 };
@@ -232,18 +224,18 @@ static const struct clk_ops vt8500_gated_divisor_clk_ops = {
 static __init void vtwm_device_clk_init(struct device_node *node)
 {
 	u32 en_reg, div_reg;
-	struct clk *clk;
+	struct clk_hw *hw;
 	struct clk_device *dev_clk;
 	const char *clk_name = node->name;
+	struct clk_init_data init = {};
 	const char *parent_name;
-	struct clk_init_data init;
 	int rc;
 	int clk_init_flags = 0;
 
 	if (!pmc_base)
 		vtwm_set_pmc_base();
 
-	dev_clk = kzalloc(sizeof(*dev_clk), GFP_KERNEL);
+	dev_clk = kzalloc_obj(*dev_clk);
 	if (WARN_ON(!dev_clk))
 		return;
 
@@ -301,13 +293,14 @@ static __init void vtwm_device_clk_init(struct device_node *node)
 
 	dev_clk->hw.init = &init;
 
-	clk = clk_register(NULL, &dev_clk->hw);
-	if (WARN_ON(IS_ERR(clk))) {
+	hw = &dev_clk->hw;
+	rc = clk_hw_register(NULL, hw);
+	if (WARN_ON(rc)) {
 		kfree(dev_clk);
 		return;
 	}
-	rc = of_clk_add_provider(node, of_clk_src_simple_get, clk);
-	clk_register_clkdev(clk, clk_name, NULL);
+	rc = of_clk_add_hw_provider(node, of_clk_hw_simple_get, hw);
+	clk_hw_register_clkdev(hw, clk_name, NULL);
 }
 CLK_OF_DECLARE(vt8500_device, "via,vt8500-device-clock", vtwm_device_clk_init);
 
@@ -602,8 +595,8 @@ static int vtwm_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 	return 0;
 }
 
-static long vtwm_pll_round_rate(struct clk_hw *hw, unsigned long rate,
-				unsigned long *prate)
+static int vtwm_pll_determine_rate(struct clk_hw *hw,
+				   struct clk_rate_request *req)
 {
 	struct clk_pll *pll = to_clk_pll(hw);
 	u32 filter, mul, div1, div2;
@@ -612,33 +605,43 @@ static long vtwm_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 
 	switch (pll->type) {
 	case PLL_TYPE_VT8500:
-		ret = vt8500_find_pll_bits(rate, *prate, &mul, &div1);
+		ret = vt8500_find_pll_bits(req->rate, req->best_parent_rate,
+					   &mul, &div1);
 		if (!ret)
-			round_rate = VT8500_BITS_TO_FREQ(*prate, mul, div1);
+			round_rate = VT8500_BITS_TO_FREQ(req->best_parent_rate,
+							 mul, div1);
 		break;
 	case PLL_TYPE_WM8650:
-		ret = wm8650_find_pll_bits(rate, *prate, &mul, &div1, &div2);
+		ret = wm8650_find_pll_bits(req->rate, req->best_parent_rate,
+					   &mul, &div1, &div2);
 		if (!ret)
-			round_rate = WM8650_BITS_TO_FREQ(*prate, mul, div1, div2);
+			round_rate = WM8650_BITS_TO_FREQ(req->best_parent_rate,
+							 mul, div1, div2);
 		break;
 	case PLL_TYPE_WM8750:
-		ret = wm8750_find_pll_bits(rate, *prate, &filter, &mul, &div1, &div2);
+		ret = wm8750_find_pll_bits(req->rate, req->best_parent_rate,
+					   &filter, &mul, &div1, &div2);
 		if (!ret)
-			round_rate = WM8750_BITS_TO_FREQ(*prate, mul, div1, div2);
+			round_rate = WM8750_BITS_TO_FREQ(req->best_parent_rate,
+							 mul, div1, div2);
 		break;
 	case PLL_TYPE_WM8850:
-		ret = wm8850_find_pll_bits(rate, *prate, &mul, &div1, &div2);
+		ret = wm8850_find_pll_bits(req->rate, req->best_parent_rate,
+					   &mul, &div1, &div2);
 		if (!ret)
-			round_rate = WM8850_BITS_TO_FREQ(*prate, mul, div1, div2);
+			round_rate = WM8850_BITS_TO_FREQ(req->best_parent_rate,
+							 mul, div1, div2);
 		break;
 	default:
-		ret = -EINVAL;
+		return -EINVAL;
 	}
 
 	if (ret)
-		return ret;
+		req->rate = ret;
+	else
+		req->rate = round_rate;
 
-	return round_rate;
+	return 0;
 }
 
 static unsigned long vtwm_pll_recalc_rate(struct clk_hw *hw,
@@ -673,7 +676,7 @@ static unsigned long vtwm_pll_recalc_rate(struct clk_hw *hw,
 }
 
 static const struct clk_ops vtwm_pll_ops = {
-	.round_rate = vtwm_pll_round_rate,
+	.determine_rate = vtwm_pll_determine_rate,
 	.set_rate = vtwm_pll_set_rate,
 	.recalc_rate = vtwm_pll_recalc_rate,
 };
@@ -681,11 +684,11 @@ static const struct clk_ops vtwm_pll_ops = {
 static __init void vtwm_pll_clk_init(struct device_node *node, int pll_type)
 {
 	u32 reg;
-	struct clk *clk;
+	struct clk_hw *hw;
 	struct clk_pll *pll_clk;
 	const char *clk_name = node->name;
+	struct clk_init_data init = {};
 	const char *parent_name;
-	struct clk_init_data init;
 	int rc;
 
 	if (!pmc_base)
@@ -695,7 +698,7 @@ static __init void vtwm_pll_clk_init(struct device_node *node, int pll_type)
 	if (WARN_ON(rc))
 		return;
 
-	pll_clk = kzalloc(sizeof(*pll_clk), GFP_KERNEL);
+	pll_clk = kzalloc_obj(*pll_clk);
 	if (WARN_ON(!pll_clk))
 		return;
 
@@ -714,13 +717,14 @@ static __init void vtwm_pll_clk_init(struct device_node *node, int pll_type)
 
 	pll_clk->hw.init = &init;
 
-	clk = clk_register(NULL, &pll_clk->hw);
-	if (WARN_ON(IS_ERR(clk))) {
+	hw = &pll_clk->hw;
+	rc = clk_hw_register(NULL, &pll_clk->hw);
+	if (WARN_ON(rc)) {
 		kfree(pll_clk);
 		return;
 	}
-	rc = of_clk_add_provider(node, of_clk_src_simple_get, clk);
-	clk_register_clkdev(clk, clk_name, NULL);
+	rc = of_clk_add_hw_provider(node, of_clk_hw_simple_get, hw);
+	clk_hw_register_clkdev(hw, clk_name, NULL);
 }
 
 

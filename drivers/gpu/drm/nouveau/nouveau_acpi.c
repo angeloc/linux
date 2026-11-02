@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #include <linux/pci.h>
 #include <linux/acpi.h>
 #include <linux/slab.h>
@@ -48,7 +49,6 @@ static struct nouveau_dsm_priv {
 	bool optimus_flags_detected;
 	bool optimus_skip_dsm;
 	acpi_handle dhandle;
-	acpi_handle rom_handle;
 } nouveau_dsm_priv;
 
 bool nouveau_is_optimus(void) {
@@ -60,15 +60,13 @@ bool nouveau_is_v1_dsm(void) {
 }
 
 #ifdef CONFIG_VGA_SWITCHEROO
-static const char nouveau_dsm_muid[] = {
-	0xA0, 0xA0, 0x95, 0x9D, 0x60, 0x00, 0x48, 0x4D,
-	0xB3, 0x4D, 0x7E, 0x5F, 0xEA, 0x12, 0x9F, 0xD4,
-};
+static const guid_t nouveau_dsm_muid =
+	GUID_INIT(0x9D95A0A0, 0x0060, 0x4D48,
+		  0xB3, 0x4D, 0x7E, 0x5F, 0xEA, 0x12, 0x9F, 0xD4);
 
-static const char nouveau_op_dsm_muid[] = {
-	0xF8, 0xD8, 0x86, 0xA4, 0xDA, 0x0B, 0x1B, 0x47,
-	0xA7, 0x2B, 0x60, 0x42, 0xA6, 0xB5, 0xBE, 0xE0,
-};
+static const guid_t nouveau_op_dsm_muid =
+	GUID_INIT(0xA486D8F8, 0x0BDA, 0x471B,
+		  0xA7, 0x2B, 0x60, 0x42, 0xA6, 0xB5, 0xBE, 0xE0);
 
 static int nouveau_optimus_dsm(acpi_handle handle, int func, int arg, uint32_t *result)
 {
@@ -86,7 +84,7 @@ static int nouveau_optimus_dsm(acpi_handle handle, int func, int arg, uint32_t *
 		args_buff[i] = (arg >> i * 8) & 0xFF;
 
 	*result = 0;
-	obj = acpi_evaluate_dsm_typed(handle, nouveau_op_dsm_muid, 0x00000100,
+	obj = acpi_evaluate_dsm_typed(handle, &nouveau_op_dsm_muid, 0x00000100,
 				      func, &argv4, ACPI_TYPE_BUFFER);
 	if (!obj) {
 		acpi_handle_info(handle, "failed to evaluate _DSM\n");
@@ -138,7 +136,7 @@ static int nouveau_dsm(acpi_handle handle, int func, int arg)
 		.integer.value = arg,
 	};
 
-	obj = acpi_evaluate_dsm_typed(handle, nouveau_dsm_muid, 0x00000102,
+	obj = acpi_evaluate_dsm_typed(handle, &nouveau_dsm_muid, 0x00000102,
 				      func, &argv4, ACPI_TYPE_INTEGER);
 	if (!obj) {
 		acpi_handle_info(handle, "failed to evaluate _DSM\n");
@@ -194,7 +192,7 @@ static int nouveau_dsm_power_state(enum vga_switcheroo_client_id id,
 	return nouveau_dsm_set_discrete_state(nouveau_dsm_priv.dhandle, state);
 }
 
-static int nouveau_dsm_get_client_id(struct pci_dev *pdev)
+static enum vga_switcheroo_client_id nouveau_dsm_get_client_id(struct pci_dev *pdev)
 {
 	/* easy option one - intel vendor ID means Integrated */
 	if (pdev->vendor == PCI_VENDOR_ID_INTEL)
@@ -213,25 +211,6 @@ static const struct vga_switcheroo_handler nouveau_dsm_handler = {
 	.get_client_id = nouveau_dsm_get_client_id,
 };
 
-/*
- * Firmware supporting Windows 8 or later do not use _DSM to put the device into
- * D3cold, they instead rely on disabling power resources on the parent.
- */
-static bool nouveau_pr3_present(struct pci_dev *pdev)
-{
-	struct pci_dev *parent_pdev = pci_upstream_bridge(pdev);
-	struct acpi_device *parent_adev;
-
-	if (!parent_pdev)
-		return false;
-
-	parent_adev = ACPI_COMPANION(&parent_pdev->dev);
-	if (!parent_adev)
-		return false;
-
-	return acpi_has_method(parent_adev->handle, "_PR3");
-}
-
 static void nouveau_dsm_pci_probe(struct pci_dev *pdev, acpi_handle *dhandle_out,
 				  bool *has_mux, bool *has_opt,
 				  bool *has_opt_flags, bool *has_pr3)
@@ -239,6 +218,19 @@ static void nouveau_dsm_pci_probe(struct pci_dev *pdev, acpi_handle *dhandle_out
 	acpi_handle dhandle;
 	bool supports_mux;
 	int optimus_funcs;
+	struct pci_dev *parent_pdev;
+
+	if (pdev->vendor != PCI_VENDOR_ID_NVIDIA)
+		return;
+
+	*has_pr3 = false;
+	parent_pdev = pci_upstream_bridge(pdev);
+	if (parent_pdev) {
+		if (parent_pdev->bridge_d3)
+			*has_pr3 = pci_pr3_present(parent_pdev);
+		else
+			pci_d3cold_disable(pdev);
+	}
 
 	dhandle = ACPI_HANDLE(&pdev->dev);
 	if (!dhandle)
@@ -247,7 +239,7 @@ static void nouveau_dsm_pci_probe(struct pci_dev *pdev, acpi_handle *dhandle_out
 	if (!acpi_has_method(dhandle, "_DSM"))
 		return;
 
-	supports_mux = acpi_check_dsm(dhandle, nouveau_dsm_muid, 0x00000102,
+	supports_mux = acpi_check_dsm(dhandle, &nouveau_dsm_muid, 0x00000102,
 				      1 << NOUVEAU_DSM_POWER);
 	optimus_funcs = nouveau_dsm_get_optimus_functions(dhandle);
 
@@ -259,7 +251,6 @@ static void nouveau_dsm_pci_probe(struct pci_dev *pdev, acpi_handle *dhandle_out
 	*has_mux = supports_mux;
 	*has_opt = !!optimus_funcs;
 	*has_opt_flags = optimus_funcs & (1 << NOUVEAU_DSM_OPTIMUS_FLAGS);
-	*has_pr3 = false;
 
 	if (optimus_funcs) {
 		uint32_t result;
@@ -269,8 +260,6 @@ static void nouveau_dsm_pci_probe(struct pci_dev *pdev, acpi_handle *dhandle_out
 			 (result & OPTIMUS_ENABLED) ? "enabled" : "disabled",
 			 (result & OPTIMUS_DYNAMIC_PWR_CAP) ? "dynamic power, " : "",
 			 (result & OPTIMUS_HDA_CODEC_MASK) ? "hda bios codec supported" : "");
-
-		*has_pr3 = nouveau_pr3_present(pdev);
 	}
 }
 
@@ -295,14 +284,11 @@ static bool nouveau_dsm_detect(void)
 		printk("MXM: GUID detected in BIOS\n");
 
 	/* now do DSM detection */
-	while ((pdev = pci_get_class(PCI_CLASS_DISPLAY_VGA << 8, pdev)) != NULL) {
-		vga_count++;
+	while ((pdev = pci_get_base_class(PCI_BASE_CLASS_DISPLAY, pdev))) {
+		if ((pdev->class != PCI_CLASS_DISPLAY_VGA << 8) &&
+		    (pdev->class != PCI_CLASS_DISPLAY_3D << 8))
+			continue;
 
-		nouveau_dsm_pci_probe(pdev, &dhandle, &has_mux, &has_optimus,
-				      &has_optimus_flags, &has_power_resources);
-	}
-
-	while ((pdev = pci_get_class(PCI_CLASS_DISPLAY_3D << 8, pdev)) != NULL) {
 		vga_count++;
 
 		nouveau_dsm_pci_probe(pdev, &dhandle, &has_mux, &has_optimus,
@@ -314,7 +300,7 @@ static bool nouveau_dsm_detect(void)
 		nouveau_dsm_priv.dhandle = dhandle;
 		acpi_get_name(nouveau_dsm_priv.dhandle, ACPI_FULL_PATHNAME,
 			&buffer);
-		printk(KERN_INFO "VGA switcheroo: detected Optimus DSM method %s handle\n",
+		pr_info("VGA switcheroo: detected Optimus DSM method %s handle\n",
 			acpi_method_name);
 		if (has_power_resources)
 			pr_info("nouveau: detected PR support, will not use DSM\n");
@@ -326,7 +312,7 @@ static bool nouveau_dsm_detect(void)
 		nouveau_dsm_priv.dhandle = dhandle;
 		acpi_get_name(nouveau_dsm_priv.dhandle, ACPI_FULL_PATHNAME,
 			&buffer);
-		printk(KERN_INFO "VGA switcheroo: detected DSM switching method %s handle\n",
+		pr_info("VGA switcheroo: detected DSM switching method %s handle\n",
 			acpi_method_name);
 		nouveau_dsm_priv.dsm_detected = true;
 		ret = true;
@@ -374,63 +360,11 @@ void nouveau_unregister_dsm_handler(void) {}
 void nouveau_switcheroo_optimus_dsm(void) {}
 #endif
 
-/* retrieve the ROM in 4k blocks */
-static int nouveau_rom_call(acpi_handle rom_handle, uint8_t *bios,
-			    int offset, int len)
-{
-	acpi_status status;
-	union acpi_object rom_arg_elements[2], *obj;
-	struct acpi_object_list rom_arg;
-	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL};
-
-	rom_arg.count = 2;
-	rom_arg.pointer = &rom_arg_elements[0];
-
-	rom_arg_elements[0].type = ACPI_TYPE_INTEGER;
-	rom_arg_elements[0].integer.value = offset;
-
-	rom_arg_elements[1].type = ACPI_TYPE_INTEGER;
-	rom_arg_elements[1].integer.value = len;
-
-	status = acpi_evaluate_object(rom_handle, NULL, &rom_arg, &buffer);
-	if (ACPI_FAILURE(status)) {
-		printk(KERN_INFO "failed to evaluate ROM got %s\n", acpi_format_exception(status));
-		return -ENODEV;
-	}
-	obj = (union acpi_object *)buffer.pointer;
-	len = min(len, (int)obj->buffer.length);
-	memcpy(bios+offset, obj->buffer.pointer, len);
-	kfree(buffer.pointer);
-	return len;
-}
-
-bool nouveau_acpi_rom_supported(struct device *dev)
-{
-	acpi_status status;
-	acpi_handle dhandle, rom_handle;
-
-	dhandle = ACPI_HANDLE(dev);
-	if (!dhandle)
-		return false;
-
-	status = acpi_get_handle(dhandle, "_ROM", &rom_handle);
-	if (ACPI_FAILURE(status))
-		return false;
-
-	nouveau_dsm_priv.rom_handle = rom_handle;
-	return true;
-}
-
-int nouveau_acpi_get_bios_chunk(uint8_t *bios, int offset, int len)
-{
-	return nouveau_rom_call(nouveau_dsm_priv.rom_handle, bios, offset, len);
-}
-
-void *
+const struct drm_edid *
 nouveau_acpi_edid(struct drm_device *dev, struct drm_connector *connector)
 {
+	const struct drm_edid *drm_edid;
 	struct acpi_device *acpidev;
-	acpi_handle handle;
 	int type, ret;
 	void *edid;
 
@@ -443,17 +377,50 @@ nouveau_acpi_edid(struct drm_device *dev, struct drm_connector *connector)
 		return NULL;
 	}
 
-	handle = ACPI_HANDLE(&dev->pdev->dev);
-	if (!handle)
-		return NULL;
-
-	ret = acpi_bus_get_device(handle, &acpidev);
-	if (ret)
+	acpidev = ACPI_COMPANION(dev->dev);
+	if (!acpidev)
 		return NULL;
 
 	ret = acpi_video_get_edid(acpidev, type, -1, &edid);
 	if (ret < 0)
 		return NULL;
 
-	return kmemdup(edid, EDID_LENGTH, GFP_KERNEL);
+	/* Take what _DDC returned as-is first as its length is the only one that
+	 * can describe an HF-EEODB EDID, whose block count is not the byte 126
+	 * one. Only if that does not validate fall back to trimming the buffer
+	 * to the byte 126 size, which is what the padding some firmware appends
+	 * needs.
+	 */
+	drm_edid = drm_edid_alloc(edid, ret);
+	if (drm_edid && !drm_edid_valid(drm_edid)) {
+		drm_edid_free(drm_edid);
+		drm_edid = NULL;
+
+		if (ret > EDID_LENGTH) {
+			int trimmed = EDID_LENGTH *
+				      (1 + ((const struct edid *)edid)->extensions);
+
+			if (trimmed < ret)
+				drm_edid = drm_edid_alloc(edid, trimmed);
+			if (drm_edid && !drm_edid_valid(drm_edid)) {
+				drm_edid_free(drm_edid);
+				drm_edid = NULL;
+			}
+		}
+	}
+	kfree(edid);
+
+	if (!drm_edid)
+		drm_dbg_kms(dev, "Invalid EDID from ACPI _DDC\n");
+	return drm_edid;
+}
+
+bool nouveau_acpi_video_backlight_use_native(void)
+{
+	return acpi_video_backlight_use_native();
+}
+
+void nouveau_acpi_video_register_backlight(void)
+{
+	acpi_video_register_backlight();
 }

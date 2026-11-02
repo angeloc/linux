@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  fs/partitions/karma.c
  *  Rio Karma partition info.
@@ -7,8 +8,9 @@
  */
 
 #include "check.h"
-#include "karma.h"
 #include <linux/compiler.h>
+
+#define KARMA_LABEL_MAGIC		0xAB56
 
 int karma_partition(struct parsed_partitions *state)
 {
@@ -51,7 +53,7 @@ int karma_partition(struct parsed_partitions *state)
 		}
 		slot++;
 	}
-	strlcat(state->pp_buf, "\n", PAGE_SIZE);
+	seq_buf_puts(&state->pp_buf, "\n");
 	put_dev_sector(sect);
 	return 1;
 }

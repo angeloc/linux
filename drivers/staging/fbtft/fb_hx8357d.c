@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * FB driver for the HX8357D LCD Controller
  * Copyright (C) 2015 Adafruit Industries
@@ -6,16 +7,6 @@
  * Copyright (C) 2013 Christian Vogelgsang
  *
  * Based on driver code found here: https://github.com/watterott/r61505u-Adapter
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -138,19 +129,6 @@ static int init_display(struct fbtft_par *par)
 	return 0;
 }
 
-static void set_addr_win(struct fbtft_par *par, int xs, int ys, int xe, int ye)
-{
-	write_reg(par, MIPI_DCS_SET_COLUMN_ADDRESS,
-		  xs >> 8, xs & 0xff,  /* XSTART */
-		  xe >> 8, xe & 0xff); /* XEND */
-
-	write_reg(par, MIPI_DCS_SET_PAGE_ADDRESS,
-		  ys >> 8, ys & 0xff,  /* YSTART */
-		  ye >> 8, ye & 0xff); /* YEND */
-
-	write_reg(par, MIPI_DCS_WRITE_MEMORY_START);
-}
-
 #define HX8357D_MADCTL_MY  0x80
 #define HX8357D_MADCTL_MX  0x40
 #define HX8357D_MADCTL_MV  0x20
@@ -193,7 +171,6 @@ static struct fbtft_display display = {
 	.gamma_len = 14,
 	.fbtftops = {
 		.init_display = init_display,
-		.set_addr_win = set_addr_win,
 		.set_var = set_var,
 	},
 };

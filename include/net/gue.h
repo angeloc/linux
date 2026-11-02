@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NET_GUE_H
 #define __NET_GUE_H
 
@@ -20,7 +21,7 @@
  * |                                                               |
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  *
- * C bit indicates contol message when set, data message when unset.
+ * C bit indicates control message when set, data message when unset.
  * For a control message, proto/ctype is interpreted as a type of
  * control message. For data messages, proto/ctype is the IP protocol
  * of the next header.
@@ -28,6 +29,9 @@
  * P bit indicates private flags field is present. The private flags
  * may refer to options placed after this field.
  */
+
+#include <asm/byteorder.h>
+#include <linux/types.h>
 
 struct guehdr {
 	union {
@@ -43,10 +47,10 @@ struct guehdr {
 #else
 #error  "Please fix <asm/byteorder.h>"
 #endif
-			__u8    proto_ctype;
-			__u16   flags;
+			__u8	proto_ctype;
+			__be16	flags;
 		};
-		__u32 word;
+		__be32	word;
 	};
 };
 
@@ -59,7 +63,7 @@ struct guehdr {
 
 /* Private flags in the private option extension */
 
-#define GUE_PFLAG_REMCSUM	htonl(1 << 31)
+#define GUE_PFLAG_REMCSUM	htonl(1U << 31)
 #define GUE_PLEN_REMCSUM	4
 
 #define GUE_PFLAGS_ALL	(GUE_PFLAG_REMCSUM)
@@ -76,18 +80,18 @@ static inline size_t guehdr_flags_len(__be16 flags)
 
 static inline size_t guehdr_priv_flags_len(__be32 flags)
 {
-	return 0;
+	return (flags & GUE_PFLAG_REMCSUM) ? GUE_PLEN_REMCSUM : 0;
 }
 
 /* Validate standard and private flags. Returns non-zero (meaning invalid)
- * if there is an unknown standard or private flags, or the options length for
- * the flags exceeds the options length specific in hlen of the GUE header.
+ * if there is an unknown standard or private flags, if the options length for
+ * the flags exceeds the options length specified in hlen of the GUE header, or
+ * if a private option contains invalid data.
  */
-static inline int validate_gue_flags(struct guehdr *guehdr,
-				     size_t optlen)
+static inline int validate_gue_flags(struct guehdr *guehdr, size_t optlen)
 {
+	__be16 flags = guehdr->flags;
 	size_t len;
-	__be32 flags = guehdr->flags;
 
 	if (flags & ~GUE_FLAGS_ALL)
 		return 1;
@@ -100,14 +104,25 @@ static inline int validate_gue_flags(struct guehdr *guehdr,
 		/* Private flags are last four bytes accounted in
 		 * guehdr_flags_len
 		 */
-		flags = *(__be32 *)((void *)&guehdr[1] + len - GUE_LEN_PRIV);
+		void *data = (void *)&guehdr[1] + len;
+		__be32 pflags = *(__be32 *)(data - GUE_LEN_PRIV);
 
-		if (flags & ~GUE_PFLAGS_ALL)
+		if (pflags & ~GUE_PFLAGS_ALL)
 			return 1;
 
-		len += guehdr_priv_flags_len(flags);
+		len += guehdr_priv_flags_len(pflags);
 		if (len > optlen)
 			return 1;
+
+		if (pflags & GUE_PFLAG_REMCSUM) {
+			__be16 *pd = data;
+
+			/* The field offset pd[1] must not be less
+			 * than the start pd[0].
+			 */
+			if (ntohs(pd[1]) < ntohs(pd[0]))
+				return 1;
+		}
 	}
 
 	return 0;

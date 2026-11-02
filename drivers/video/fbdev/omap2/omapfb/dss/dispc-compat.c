@@ -1,22 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Texas Instruments
  * Author: Tomi Valkeinen <tomi.valkeinen@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #define DSS_SUBSYS_NAME "APPLY"
 
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -86,7 +76,7 @@ static void dispc_dump_irqs(struct seq_file *s)
 
 	seq_printf(s, "irqs %d\n", stats.irq_count);
 #define PIS(x) \
-	seq_printf(s, "%-20s %10d\n", #x, stats.irqs[ffs(DISPC_IRQ_##x)-1]);
+	seq_printf(s, "%-20s %10d\n", #x, stats.irqs[ffs(DISPC_IRQ_##x)-1])
 
 	PIS(FRAMEDONE);
 	PIS(VSYNC);
@@ -644,6 +634,7 @@ int omap_dispc_wait_for_irq_interruptible_timeout(u32 irqmask,
 {
 
 	int r;
+	long time_left;
 	DECLARE_COMPLETION_ONSTACK(completion);
 
 	r = omap_dispc_register_isr(dispc_irq_wait_handler, &completion,
@@ -652,15 +643,15 @@ int omap_dispc_wait_for_irq_interruptible_timeout(u32 irqmask,
 	if (r)
 		return r;
 
-	timeout = wait_for_completion_interruptible_timeout(&completion,
+	time_left = wait_for_completion_interruptible_timeout(&completion,
 			timeout);
 
 	omap_dispc_unregister_isr(dispc_irq_wait_handler, &completion, irqmask);
 
-	if (timeout == 0)
+	if (time_left == 0)
 		return -ETIMEDOUT;
 
-	if (timeout == -ERESTARTSYS)
+	if (time_left == -ERESTARTSYS)
 		return -ERESTARTSYS;
 
 	return 0;

@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef LINUX_BCMA_H_
 #define LINUX_BCMA_H_
 
 #include <linux/pci.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/bcma.h>
 
 #include <linux/bcma/bcma_driver_arm_c9.h>
 #include <linux/bcma/bcma_driver_chipcommon.h>
@@ -205,6 +206,9 @@ struct bcma_host_ops {
 #define  BCMA_PKG_ID_BCM4709	0
 #define BCMA_CHIP_ID_BCM47094	53030
 #define BCMA_CHIP_ID_BCM53018	53018
+#define BCMA_CHIP_ID_BCM53573	53573
+#define  BCMA_PKG_ID_BCM53573	0
+#define  BCMA_PKG_ID_BCM47189	1
 
 /* Board types (on PCI usually equals to the subsystem dev id) */
 /* BCM4313 */
@@ -328,6 +332,8 @@ extern int bcma_arch_register_fallback_sprom(
 		struct ssb_sprom *out));
 
 struct bcma_bus {
+	struct device *dev;
+
 	/* The MMIO area. */
 	void __iomem *mmio;
 
@@ -335,14 +341,7 @@ struct bcma_bus {
 
 	enum bcma_hosttype hosttype;
 	bool host_is_pcie2; /* Used for BCMA_HOSTTYPE_PCI only */
-	union {
-		/* Pointer to the PCI bus (only for BCMA_HOSTTYPE_PCI) */
-		struct pci_dev *host_pci;
-		/* Pointer to the SDIO device (only for BCMA_HOSTTYPE_SDIO) */
-		struct sdio_func *host_sdio;
-		/* Pointer to platform device (only for BCMA_HOSTTYPE_SOC) */
-		struct platform_device *host_pdev;
-	};
+	struct pci_dev *host_pci; /* PCI bus pointer (BCMA_HOSTTYPE_PCI only) */
 
 	struct bcma_chipinfo chipinfo;
 
@@ -486,5 +485,7 @@ extern u32 bcma_chipco_pll_read(struct bcma_drv_cc *cc, u32 offset);
 extern u32 bcma_core_dma_translation(struct bcma_device *core);
 
 extern unsigned int bcma_core_irq(struct bcma_device *core, int num);
+
+extern const struct software_node bcma_gpio_swnode;
 
 #endif /* LINUX_BCMA_H_ */

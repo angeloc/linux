@@ -21,20 +21,25 @@
  *
  * Authors: Alex Deucher
  */
+
 #include <linux/firmware.h>
-#include <linux/slab.h>
 #include <linux/module.h>
-#include <drm/drmP.h>
+#include <linux/pci.h>
+#include <linux/slab.h>
+
+#include <drm/radeon_drm.h>
+
+#include "atom.h"
+#include "cayman_blit_shaders.h"
+#include "clearstate_cayman.h"
+#include "evergreen.h"
+#include "ni.h"
+#include "ni_reg.h"
+#include "nid.h"
 #include "radeon.h"
 #include "radeon_asic.h"
 #include "radeon_audio.h"
-#include <drm/radeon_drm.h>
-#include "nid.h"
-#include "atom.h"
-#include "ni_reg.h"
-#include "cayman_blit_shaders.h"
 #include "radeon_ucode.h"
-#include "clearstate_cayman.h"
 
 /*
  * Indirect registers accessor
@@ -61,8 +66,7 @@ void tn_smc_wreg(struct radeon_device *rdev, u32 reg, u32 v)
 	spin_unlock_irqrestore(&rdev->smc_idx_lock, flags);
 }
 
-static const u32 tn_rlc_save_restore_register_list[] =
-{
+static const u32 tn_rlc_save_restore_register_list[] = {
 	0x98fc,
 	0x98f0,
 	0x9834,
@@ -187,21 +191,6 @@ static const u32 tn_rlc_save_restore_register_list[] =
 	0x802c,
 };
 
-extern bool evergreen_is_display_hung(struct radeon_device *rdev);
-extern void evergreen_print_gpu_status_regs(struct radeon_device *rdev);
-extern void evergreen_mc_stop(struct radeon_device *rdev, struct evergreen_mc_save *save);
-extern void evergreen_mc_resume(struct radeon_device *rdev, struct evergreen_mc_save *save);
-extern int evergreen_mc_wait_for_idle(struct radeon_device *rdev);
-extern void evergreen_mc_program(struct radeon_device *rdev);
-extern void evergreen_irq_suspend(struct radeon_device *rdev);
-extern int evergreen_mc_init(struct radeon_device *rdev);
-extern void evergreen_fix_pci_max_read_req_size(struct radeon_device *rdev);
-extern void evergreen_pcie_gen2_enable(struct radeon_device *rdev);
-extern void evergreen_program_aspm(struct radeon_device *rdev);
-extern void sumo_rlc_fini(struct radeon_device *rdev);
-extern int sumo_rlc_init(struct radeon_device *rdev);
-extern void evergreen_gpu_pci_config_reset(struct radeon_device *rdev);
-
 /* Firmware Names */
 MODULE_FIRMWARE("radeon/BARTS_pfp.bin");
 MODULE_FIRMWARE("radeon/BARTS_me.bin");
@@ -226,8 +215,7 @@ MODULE_FIRMWARE("radeon/ARUBA_me.bin");
 MODULE_FIRMWARE("radeon/ARUBA_rlc.bin");
 
 
-static const u32 cayman_golden_registers2[] =
-{
+static const u32 cayman_golden_registers2[] = {
 	0x3e5c, 0xffffffff, 0x00000000,
 	0x3e48, 0xffffffff, 0x00000000,
 	0x3e4c, 0xffffffff, 0x00000000,
@@ -236,8 +224,7 @@ static const u32 cayman_golden_registers2[] =
 	0x3e60, 0xffffffff, 0x00000000
 };
 
-static const u32 cayman_golden_registers[] =
-{
+static const u32 cayman_golden_registers[] = {
 	0x5eb4, 0xffffffff, 0x00000002,
 	0x5e78, 0x8f311ff1, 0x001000f0,
 	0x3f90, 0xffff0000, 0xff000000,
@@ -277,16 +264,14 @@ static const u32 cayman_golden_registers[] =
 	0x8974, 0xffffffff, 0x00000000
 };
 
-static const u32 dvst_golden_registers2[] =
-{
+static const u32 dvst_golden_registers2[] = {
 	0x8f8, 0xffffffff, 0,
 	0x8fc, 0x00380000, 0,
 	0x8f8, 0xffffffff, 1,
 	0x8fc, 0x0e000000, 0
 };
 
-static const u32 dvst_golden_registers[] =
-{
+static const u32 dvst_golden_registers[] = {
 	0x690, 0x3fff3fff, 0x20c00033,
 	0x918c, 0x0fff0fff, 0x00010006,
 	0x91a8, 0x0fff0fff, 0x00010006,
@@ -343,8 +328,7 @@ static const u32 dvst_golden_registers[] =
 	0x8974, 0xffffffff, 0x00000000
 };
 
-static const u32 scrapper_golden_registers[] =
-{
+static const u32 scrapper_golden_registers[] = {
 	0x690, 0x3fff3fff, 0x20c00033,
 	0x918c, 0x0fff0fff, 0x00010006,
 	0x918c, 0x0fff0fff, 0x00010006,
@@ -634,7 +618,7 @@ static const u32 cayman_io_mc_regs[BTC_IO_MC_REGS_SIZE][2] = {
 int ni_mc_load_microcode(struct radeon_device *rdev)
 {
 	const __be32 *fw_data;
-	u32 mem_type, running, blackout = 0;
+	u32 mem_type, running;
 	u32 *io_mc_regs;
 	int i, ucode_size, regs_size;
 
@@ -669,11 +653,6 @@ int ni_mc_load_microcode(struct radeon_device *rdev)
 	running = RREG32(MC_SEQ_SUP_CNTL) & RUN_MASK;
 
 	if ((mem_type == MC_SEQ_MISC0_GDDR5_VALUE) && (running == 0)) {
-		if (running) {
-			blackout = RREG32(MC_SHARED_BLACKOUT_CNTL);
-			WREG32(MC_SHARED_BLACKOUT_CNTL, 1);
-		}
-
 		/* reset the engine and set to writable */
 		WREG32(MC_SEQ_SUP_CNTL, 0x00000008);
 		WREG32(MC_SEQ_SUP_CNTL, 0x00000010);
@@ -699,9 +678,6 @@ int ni_mc_load_microcode(struct radeon_device *rdev)
 				break;
 			udelay(1);
 		}
-
-		if (running)
-			WREG32(MC_SHARED_BLACKOUT_CNTL, blackout);
 	}
 
 	return 0;
@@ -764,7 +740,8 @@ int ni_init_microcode(struct radeon_device *rdev)
 		rlc_req_size = ARUBA_RLC_UCODE_SIZE * 4;
 		mc_req_size = 0;
 		break;
-	default: BUG();
+	default:
+		BUG();
 	}
 
 	DRM_INFO("Loading %s Microcode\n", chip_name);
@@ -774,8 +751,7 @@ int ni_init_microcode(struct radeon_device *rdev)
 	if (err)
 		goto out;
 	if (rdev->pfp_fw->size != pfp_req_size) {
-		printk(KERN_ERR
-		       "ni_cp: Bogus length %zu in firmware \"%s\"\n",
+		pr_err("ni_cp: Bogus length %zu in firmware \"%s\"\n",
 		       rdev->pfp_fw->size, fw_name);
 		err = -EINVAL;
 		goto out;
@@ -786,8 +762,7 @@ int ni_init_microcode(struct radeon_device *rdev)
 	if (err)
 		goto out;
 	if (rdev->me_fw->size != me_req_size) {
-		printk(KERN_ERR
-		       "ni_cp: Bogus length %zu in firmware \"%s\"\n",
+		pr_err("ni_cp: Bogus length %zu in firmware \"%s\"\n",
 		       rdev->me_fw->size, fw_name);
 		err = -EINVAL;
 	}
@@ -797,8 +772,7 @@ int ni_init_microcode(struct radeon_device *rdev)
 	if (err)
 		goto out;
 	if (rdev->rlc_fw->size != rlc_req_size) {
-		printk(KERN_ERR
-		       "ni_rlc: Bogus length %zu in firmware \"%s\"\n",
+		pr_err("ni_rlc: Bogus length %zu in firmware \"%s\"\n",
 		       rdev->rlc_fw->size, fw_name);
 		err = -EINVAL;
 	}
@@ -810,8 +784,7 @@ int ni_init_microcode(struct radeon_device *rdev)
 		if (err)
 			goto out;
 		if (rdev->mc_fw->size != mc_req_size) {
-			printk(KERN_ERR
-			       "ni_mc: Bogus length %zu in firmware \"%s\"\n",
+			pr_err("ni_mc: Bogus length %zu in firmware \"%s\"\n",
 			       rdev->mc_fw->size, fw_name);
 			err = -EINVAL;
 		}
@@ -821,16 +794,13 @@ int ni_init_microcode(struct radeon_device *rdev)
 		snprintf(fw_name, sizeof(fw_name), "radeon/%s_smc.bin", chip_name);
 		err = request_firmware(&rdev->smc_fw, fw_name, rdev->dev);
 		if (err) {
-			printk(KERN_ERR
-			       "smc: error loading firmware \"%s\"\n",
-			       fw_name);
+			pr_err("smc: error loading firmware \"%s\"\n", fw_name);
 			release_firmware(rdev->smc_fw);
 			rdev->smc_fw = NULL;
 			err = 0;
 		} else if (rdev->smc_fw->size != smc_req_size) {
-			printk(KERN_ERR
-			       "ni_mc: Bogus length %zu in firmware \"%s\"\n",
-			       rdev->mc_fw->size, fw_name);
+			pr_err("ni_mc: Bogus length %zu in firmware \"%s\"\n",
+			       rdev->smc_fw->size, fw_name);
 			err = -EINVAL;
 		}
 	}
@@ -838,8 +808,7 @@ int ni_init_microcode(struct radeon_device *rdev)
 out:
 	if (err) {
 		if (err != -EINVAL)
-			printk(KERN_ERR
-			       "ni_cp: Failed to load firmware \"%s\"\n",
+			pr_err("ni_cp: Failed to load firmware \"%s\"\n",
 			       fw_name);
 		release_firmware(rdev->pfp_fw);
 		rdev->pfp_fw = NULL;
@@ -896,7 +865,7 @@ int tn_get_temp(struct radeon_device *rdev)
 static void cayman_gpu_init(struct radeon_device *rdev)
 {
 	u32 gb_addr_config = 0;
-	u32 mc_shared_chmap, mc_arb_ramcfg;
+	u32 mc_arb_ramcfg;
 	u32 cgts_tcc_disable;
 	u32 sx_debug_1;
 	u32 smx_dc_ctl0;
@@ -1021,7 +990,7 @@ static void cayman_gpu_init(struct radeon_device *rdev)
 
 	evergreen_fix_pci_max_read_req_size(rdev);
 
-	mc_shared_chmap = RREG32(MC_SHARED_CHMAP);
+	RREG32(MC_SHARED_CHMAP);
 	mc_arb_ramcfg = RREG32(MC_ARB_RAMCFG);
 
 	tmp = (mc_arb_ramcfg & NOOFCOLS_MASK) >> NOOFCOLS_SHIFT;
@@ -1156,6 +1125,7 @@ static void cayman_gpu_init(struct radeon_device *rdev)
 						rdev->config.cayman.max_shader_engines,
 						CAYMAN_MAX_BACKENDS, disabled_rb_mask);
 	}
+	rdev->config.cayman.backend_map = tmp;
 	WREG32(GB_BACKEND_MAP, tmp);
 
 	cgts_tcc_disable = 0xffff0000;
@@ -1396,9 +1366,7 @@ static void cayman_pcie_gart_fini(struct radeon_device *rdev)
 void cayman_cp_int_cntl_setup(struct radeon_device *rdev,
 			      int ring, u32 cp_int_cntl)
 {
-	u32 srbm_gfx_cntl = RREG32(SRBM_GFX_CNTL) & ~3;
-
-	WREG32(SRBM_GFX_CNTL, srbm_gfx_cntl | (ring & 3));
+	WREG32(SRBM_GFX_CNTL, RINGID(ring));
 	WREG32(CP_INT_CNTL, cp_int_cntl);
 }
 
@@ -2023,7 +1991,7 @@ static void cayman_uvd_init(struct radeon_device *rdev)
 		 * there. So it is pointless to try to go through that code
 		 * hence why we disable uvd here.
 		 */
-		rdev->has_uvd = 0;
+		rdev->has_uvd = false;
 		return;
 	}
 	rdev->ring[R600_RING_TYPE_UVD_INDEX].ring_obj = NULL;
@@ -2062,7 +2030,7 @@ static void cayman_uvd_resume(struct radeon_device *rdev)
 		return;
 
 	ring = &rdev->ring[R600_RING_TYPE_UVD_INDEX];
-	r = radeon_ring_init(rdev, ring, ring->ring_size, 0, RADEON_CP_PACKET2);
+	r = radeon_ring_init(rdev, ring, ring->ring_size, 0, PACKET0(UVD_NO_OP, 0));
 	if (r) {
 		dev_err(rdev->dev, "failed initializing UVD ring (%d).\n", r);
 		return;
@@ -2091,7 +2059,7 @@ static void cayman_vce_init(struct radeon_device *rdev)
 		 * there. So it is pointless to try to go through that code
 		 * hence why we disable vce here.
 		 */
-		rdev->has_vce = 0;
+		rdev->has_vce = false;
 		return;
 	}
 	rdev->ring[TN_RING_TYPE_VCE1_INDEX].ring_obj = NULL;
@@ -2342,8 +2310,8 @@ int cayman_suspend(struct radeon_device *rdev)
 	cayman_cp_enable(rdev, false);
 	cayman_dma_stop(rdev);
 	if (rdev->has_uvd) {
-		uvd_v1_0_fini(rdev);
 		radeon_uvd_suspend(rdev);
+		uvd_v1_0_fini(rdev);
 	}
 	evergreen_irq_suspend(rdev);
 	radeon_wb_disable(rdev);
@@ -2392,11 +2360,9 @@ int cayman_init(struct radeon_device *rdev)
 	/* Initialize surface registers */
 	radeon_surface_init(rdev);
 	/* Initialize clocks */
-	radeon_get_clock_info(rdev->ddev);
+	radeon_get_clock_info(rdev_to_drm(rdev));
 	/* Fence driver */
-	r = radeon_fence_driver_init(rdev);
-	if (r)
-		return r;
+	radeon_fence_driver_init(rdev);
 	/* initialize memory controller */
 	r = evergreen_mc_init(rdev);
 	if (r)
@@ -2688,10 +2654,8 @@ void cayman_vm_decode_fault(struct radeon_device *rdev,
 	       block, mc_id);
 }
 
-/**
+/*
  * cayman_vm_flush - vm flush using the CP
- *
- * @rdev: radeon_device pointer
  *
  * Update the page table base and flush the VM TLB
  * using the CP (cayman-si).

@@ -1,24 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *
  * Copyright (c) 2009, Microsoft Corporation.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
- * Place - Suite 330, Boston, MA 02111-1307 USA.
- *
  * Authors:
  *   Haiyang Zhang <haiyangz@microsoft.com>
  *   Hank Janssen  <hjanssen@microsoft.com>
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
@@ -27,18 +14,30 @@
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/hyperv.h>
 #include <linux/export.h>
-#include <asm/hyperv.h>
+#include <linux/io.h>
+#include <linux/set_memory.h>
+#include <asm/mshyperv.h>
+
 #include "hyperv_vmbus.h"
 
 
 struct vmbus_connection vmbus_connection = {
 	.conn_state		= DISCONNECTED,
+	.unload_event		= COMPLETION_INITIALIZER(
+				  vmbus_connection.unload_event),
 	.next_gpadl_handle	= ATOMIC_INIT(0xE1E10),
+
+	.ready_for_suspend_event = COMPLETION_INITIALIZER(
+				  vmbus_connection.ready_for_suspend_event),
+	.all_offers_delivered_event = COMPLETION_INITIALIZER(
+				  vmbus_connection.all_offers_delivered_event),
 };
+EXPORT_SYMBOL_GPL(vmbus_connection);
 
 /*
  * Negotiated protocol version with the host.
@@ -46,29 +45,35 @@ struct vmbus_connection vmbus_connection = {
 __u32 vmbus_proto_version;
 EXPORT_SYMBOL_GPL(vmbus_proto_version);
 
-static __u32 vmbus_get_next_version(__u32 current_version)
-{
-	switch (current_version) {
-	case (VERSION_WIN7):
-		return VERSION_WS2008;
+/*
+ * Table of VMBus versions listed from newest to oldest.
+ * VERSION_WIN7,VERSION_WS2008, VERSION_WIN8 (which is
+ * Windows Server 2012) and VERSION_WIN8_1 (which is
+ * Windows Server 2012 R2) are no longer supported in
+ * Linux guests and are not listed.
+ */
+static __u32 vmbus_versions[] = {
+	VERSION_WIN10_V6_0,
+	VERSION_WIN10_V5_3,
+	VERSION_WIN10_V5_2,
+	VERSION_WIN10_V5_1,
+	VERSION_WIN10_V5,
+	VERSION_WIN10_V4_1,
+	VERSION_WIN10
+};
 
-	case (VERSION_WIN8):
-		return VERSION_WIN7;
+/*
+ * Maximal VMBus protocol version guests can negotiate.  Useful to cap the
+ * VMBus version for testing and debugging purpose.
+ */
+static uint max_version = VERSION_WIN10_V6_0;
 
-	case (VERSION_WIN8_1):
-		return VERSION_WIN8;
+module_param(max_version, uint, S_IRUGO);
+MODULE_PARM_DESC(max_version,
+		 "Maximal VMBus protocol version which can be negotiated");
 
-	case (VERSION_WIN10):
-		return VERSION_WIN8_1;
-
-	case (VERSION_WS2008):
-	default:
-		return VERSION_INVAL;
-	}
-}
-
-static int vmbus_negotiate_version(struct vmbus_channel_msginfo *msginfo,
-					__u32 version)
+static int vmbus_try_connection_id(struct vmbus_channel_msginfo *msginfo,
+				   u32 version, u32 connection_id)
 {
 	int ret = 0;
 	struct vmbus_channel_initiate_contact *msg;
@@ -78,26 +83,43 @@ static int vmbus_negotiate_version(struct vmbus_channel_msginfo *msginfo,
 
 	msg = (struct vmbus_channel_initiate_contact *)msginfo->msg;
 
+	memset(msg, 0, sizeof(*msg));
 	msg->header.msgtype = CHANNELMSG_INITIATE_CONTACT;
 	msg->vmbus_version_requested = version;
-	msg->interrupt_page = virt_to_phys(vmbus_connection.int_page);
-	msg->monitor_page1 = virt_to_phys(vmbus_connection.monitor_pages[0]);
-	msg->monitor_page2 = virt_to_phys(vmbus_connection.monitor_pages[1]);
+
 	/*
-	 * We want all channel messages to be delivered on CPU 0.
-	 * This has been the behavior pre-win8. This is not
-	 * perf issue and having all channel messages delivered on CPU 0
-	 * would be ok.
-	 * For post win8 hosts, we support receiving channel messagges on
-	 * all the CPUs. This is needed for kexec to work correctly where
-	 * the CPU attempting to connect may not be CPU 0.
+	 * For VMBus protocol 5.0 (VERSION_WIN10_V5) and higher, use the
+	 * caller-supplied connection_id for the Initiate Contact message so
+	 * the caller can implement the required retry scheme. For subsequent
+	 * messages, use the Message Connection ID field in the host-returned
+	 * Version Response message. With VERSION_WIN10_V5 and higher, we don't
+	 * use msg->interrupt_page, but tell the host explicitly that we still
+	 * use VMBUS_MESSAGE_SINT(2) for compatibility.
+	 *
+	 * On old hosts, we should always use VMBUS_MESSAGE_CONNECTION_ID (1).
 	 */
-	if (version >= VERSION_WIN8_1) {
-		msg->target_vcpu = hv_context.vp_index[get_cpu()];
-		put_cpu();
+	if (version >= VERSION_WIN10_V5) {
+		msg->msg_sint = VMBUS_MESSAGE_SINT;
+		msg->msg_vtl = ms_hyperv.vtl;
+		vmbus_connection.msg_conn_id = connection_id;
 	} else {
-		msg->target_vcpu = 0;
+		msg->interrupt_page = virt_to_phys(vmbus_connection.int_page);
+		vmbus_connection.msg_conn_id = VMBUS_MESSAGE_CONNECTION_ID;
 	}
+
+	if (vmbus_is_confidential() && version >= VERSION_WIN10_V6_0)
+		msg->feature_flags = VMBUS_FEATURE_FLAG_CONFIDENTIAL_CHANNELS;
+
+	/*
+	 * shared_gpa_boundary is zero in non-SNP VMs, so it's safe to always
+	 * bitwise OR it
+	 */
+	msg->monitor_page1 = virt_to_phys(vmbus_connection.monitor_pages[0]) |
+				ms_hyperv.shared_gpa_boundary;
+	msg->monitor_page2 = virt_to_phys(vmbus_connection.monitor_pages[1]) |
+				ms_hyperv.shared_gpa_boundary;
+
+	msg->target_vcpu = hv_cpu_number_to_vp_number(VMBUS_CONNECT_CPU);
 
 	/*
 	 * Add to list before we send the request since we may
@@ -110,7 +132,11 @@ static int vmbus_negotiate_version(struct vmbus_channel_msginfo *msginfo,
 	spin_unlock_irqrestore(&vmbus_connection.channelmsg_lock, flags);
 
 	ret = vmbus_post_msg(msg,
-			       sizeof(struct vmbus_channel_initiate_contact));
+			     sizeof(struct vmbus_channel_initiate_contact),
+			     true);
+
+	trace_vmbus_negotiate_version(msg, ret);
+
 	if (ret != 0) {
 		spin_lock_irqsave(&vmbus_connection.channelmsg_lock, flags);
 		list_del(&msginfo->msglistentry);
@@ -129,6 +155,10 @@ static int vmbus_negotiate_version(struct vmbus_channel_msginfo *msginfo,
 	/* Check if successful */
 	if (msginfo->response.version_response.version_supported) {
 		vmbus_connection.conn_state = CONNECTED;
+
+		if (version >= VERSION_WIN10_V5)
+			vmbus_connection.msg_conn_id =
+				msginfo->response.version_response.msg_conn_id;
 	} else {
 		return -ECONNREFUSED;
 	}
@@ -136,19 +166,57 @@ static int vmbus_negotiate_version(struct vmbus_channel_msginfo *msginfo,
 	return ret;
 }
 
+int vmbus_negotiate_version(struct vmbus_channel_msginfo *msginfo, u32 version)
+{
+	int ret;
+
+	/* Try the redirect ID first for VTL2 with VMBus protocol 5.0+. */
+	if (version >= VERSION_WIN10_V5 && ms_hyperv.vtl == 2) {
+		ret = vmbus_try_connection_id(msginfo, version,
+					      VMBUS_MESSAGE_CONNECTION_ID_REDIRECT);
+		if (ret != -ENXIO)
+			return ret;
+	}
+
+	return vmbus_try_connection_id(msginfo, version,
+				       VMBUS_MESSAGE_CONNECTION_ID_4);
+}
+
 /*
  * vmbus_connect - Sends a connect request on the partition service connection
  */
 int vmbus_connect(void)
 {
-	int ret = 0;
 	struct vmbus_channel_msginfo *msginfo = NULL;
+	int i, ret = 0;
 	__u32 version;
 
 	/* Initialize the vmbus connection */
 	vmbus_connection.conn_state = CONNECTING;
 	vmbus_connection.work_queue = create_workqueue("hv_vmbus_con");
 	if (!vmbus_connection.work_queue) {
+		ret = -ENOMEM;
+		goto cleanup;
+	}
+
+	vmbus_connection.rescind_work_queue =
+		create_workqueue("hv_vmbus_rescind");
+	if (!vmbus_connection.rescind_work_queue) {
+		ret = -ENOMEM;
+		goto cleanup;
+	}
+	vmbus_connection.ignore_any_offer_msg = false;
+
+	vmbus_connection.handle_primary_chan_wq =
+		create_workqueue("hv_pri_chan");
+	if (!vmbus_connection.handle_primary_chan_wq) {
+		ret = -ENOMEM;
+		goto cleanup;
+	}
+
+	vmbus_connection.handle_sub_chan_wq =
+		create_workqueue("hv_sub_chan");
+	if (!vmbus_connection.handle_sub_chan_wq) {
 		ret = -ENOMEM;
 		goto cleanup;
 	}
@@ -160,11 +228,19 @@ int vmbus_connect(void)
 	mutex_init(&vmbus_connection.channel_mutex);
 
 	/*
+	 * The following Hyper-V interrupt and monitor pages can be used by
+	 * UIO for mapping to user-space, so they should always be allocated on
+	 * system page boundaries. The system page size must be >= the Hyper-V
+	 * page size.
+	 */
+	BUILD_BUG_ON(PAGE_SIZE < HV_HYP_PAGE_SIZE);
+
+	/*
 	 * Setup the vmbus event connection for channel interrupt
 	 * abstraction stuff
 	 */
 	vmbus_connection.int_page =
-	(void *)__get_free_pages(GFP_KERNEL|__GFP_ZERO, 0);
+		(void *)__get_free_page(GFP_KERNEL | __GFP_ZERO);
 	if (vmbus_connection.int_page == NULL) {
 		ret = -ENOMEM;
 		goto cleanup;
@@ -173,19 +249,42 @@ int vmbus_connect(void)
 	vmbus_connection.recv_int_page = vmbus_connection.int_page;
 	vmbus_connection.send_int_page =
 		(void *)((unsigned long)vmbus_connection.int_page +
-			(PAGE_SIZE >> 1));
+			(HV_HYP_PAGE_SIZE >> 1));
 
 	/*
 	 * Setup the monitor notification facility. The 1st page for
 	 * parent->child and the 2nd page for child->parent
 	 */
-	vmbus_connection.monitor_pages[0] = (void *)__get_free_pages((GFP_KERNEL|__GFP_ZERO), 0);
-	vmbus_connection.monitor_pages[1] = (void *)__get_free_pages((GFP_KERNEL|__GFP_ZERO), 0);
+	vmbus_connection.monitor_pages[0] = (void *)__get_free_page(GFP_KERNEL);
+	vmbus_connection.monitor_pages[1] = (void *)__get_free_page(GFP_KERNEL);
 	if ((vmbus_connection.monitor_pages[0] == NULL) ||
 	    (vmbus_connection.monitor_pages[1] == NULL)) {
 		ret = -ENOMEM;
 		goto cleanup;
 	}
+
+	ret = set_memory_decrypted((unsigned long)
+				vmbus_connection.monitor_pages[0], 1);
+	ret |= set_memory_decrypted((unsigned long)
+				vmbus_connection.monitor_pages[1], 1);
+	if (ret) {
+		/*
+		 * If set_memory_decrypted() fails, the encryption state
+		 * of the memory is unknown. So leak the memory instead
+		 * of risking returning decrypted memory to the free list.
+		 * For simplicity, always handle both pages the same.
+		 */
+		vmbus_connection.monitor_pages[0] = NULL;
+		vmbus_connection.monitor_pages[1] = NULL;
+		goto cleanup;
+	}
+
+	/*
+	 * Set_memory_decrypted() will change the memory contents if
+	 * decryption occurs, so zero monitor pages here.
+	 */
+	memset(vmbus_connection.monitor_pages[0], 0x00, HV_HYP_PAGE_SIZE);
+	memset(vmbus_connection.monitor_pages[1], 0x00, HV_HYP_PAGE_SIZE);
 
 	msginfo = kzalloc(sizeof(*msginfo) +
 			  sizeof(struct vmbus_channel_initiate_contact),
@@ -202,28 +301,44 @@ int vmbus_connect(void)
 	 * version.
 	 */
 
-	version = VERSION_CURRENT;
+	for (i = 0; ; i++) {
+		if (i == ARRAY_SIZE(vmbus_versions)) {
+			ret = -EDOM;
+			pr_err("Hyper-V host does not support VMBus version %d.%d or higher;\n\
+		 the host may be an older version no longer supported by Linux\n",
+				vmbus_versions[i-1] >> 16, vmbus_versions[i-1] & 0xFFFF);
+			goto cleanup;
+		}
 
-	do {
+		version = vmbus_versions[i];
+		if (version > max_version)
+			continue;
+
 		ret = vmbus_negotiate_version(msginfo, version);
 		if (ret == -ETIMEDOUT)
 			goto cleanup;
 
 		if (vmbus_connection.conn_state == CONNECTED)
 			break;
+	}
 
-		version = vmbus_get_next_version(version);
-	} while (version != VERSION_INVAL);
-
-	if (version == VERSION_INVAL)
+	if (hv_is_isolation_supported() && version < VERSION_WIN10_V5_2) {
+		pr_err("Invalid VMBus version %d.%d (expected >= %d.%d) from the host supporting isolation\n",
+		       version >> 16, version & 0xFFFF, VERSION_WIN10_V5_2 >> 16, VERSION_WIN10_V5_2 & 0xFFFF);
+		ret = -EINVAL;
 		goto cleanup;
+	}
 
 	vmbus_proto_version = version;
-	pr_info("Hyper-V Host Build:%d-%d.%d-%d-%d.%d; Vmbus version:%d.%d\n",
-		    host_info_eax, host_info_ebx >> 16,
-		    host_info_ebx & 0xFFFF, host_info_ecx,
-		    host_info_edx >> 24, host_info_edx & 0xFFFFFF,
-		    version >> 16, version & 0xFFFF);
+	pr_info("Vmbus version:%d.%d\n",
+		version >> 16, version & 0xFFFF);
+
+	vmbus_connection.channels = kzalloc_objs(struct vmbus_channel *,
+						 MAX_CHANNEL_RELIDS);
+	if (vmbus_connection.channels == NULL) {
+		ret = -ENOMEM;
+		goto cleanup;
+	}
 
 	kfree(msginfo);
 	return 0;
@@ -231,7 +346,6 @@ int vmbus_connect(void)
 cleanup:
 	pr_err("Unable to connect to host\n");
 
-	vmbus_connection.conn_state = DISCONNECTED;
 	vmbus_disconnect();
 
 	kfree(msginfo);
@@ -246,43 +360,38 @@ void vmbus_disconnect(void)
 	 */
 	vmbus_initiate_unload(false);
 
-	if (vmbus_connection.work_queue) {
-		drain_workqueue(vmbus_connection.work_queue);
+	if (vmbus_connection.handle_sub_chan_wq)
+		destroy_workqueue(vmbus_connection.handle_sub_chan_wq);
+
+	if (vmbus_connection.handle_primary_chan_wq)
+		destroy_workqueue(vmbus_connection.handle_primary_chan_wq);
+
+	if (vmbus_connection.rescind_work_queue)
+		destroy_workqueue(vmbus_connection.rescind_work_queue);
+
+	if (vmbus_connection.work_queue)
 		destroy_workqueue(vmbus_connection.work_queue);
-	}
 
 	if (vmbus_connection.int_page) {
-		free_pages((unsigned long)vmbus_connection.int_page, 0);
+		free_page((unsigned long)vmbus_connection.int_page);
 		vmbus_connection.int_page = NULL;
 	}
 
-	free_pages((unsigned long)vmbus_connection.monitor_pages[0], 0);
-	free_pages((unsigned long)vmbus_connection.monitor_pages[1], 0);
-	vmbus_connection.monitor_pages[0] = NULL;
-	vmbus_connection.monitor_pages[1] = NULL;
-}
-
-/*
- * Map the given relid to the corresponding channel based on the
- * per-cpu list of channels that have been affinitized to this CPU.
- * This will be used in the channel callback path as we can do this
- * mapping in a lock-free fashion.
- */
-static struct vmbus_channel *pcpu_relid2channel(u32 relid)
-{
-	struct vmbus_channel *channel;
-	struct vmbus_channel *found_channel  = NULL;
-	int cpu = smp_processor_id();
-	struct list_head *pcpu_head = &hv_context.percpu_list[cpu];
-
-	list_for_each_entry(channel, pcpu_head, percpu_list) {
-		if (channel->offermsg.child_relid == relid) {
-			found_channel = channel;
-			break;
-		}
+	if (vmbus_connection.monitor_pages[0]) {
+		if (!set_memory_encrypted(
+			(unsigned long)vmbus_connection.monitor_pages[0], 1))
+			free_page((unsigned long)
+				vmbus_connection.monitor_pages[0]);
+		vmbus_connection.monitor_pages[0] = NULL;
 	}
 
-	return found_channel;
+	if (vmbus_connection.monitor_pages[1]) {
+		if (!set_memory_encrypted(
+			(unsigned long)vmbus_connection.monitor_pages[1], 1))
+			free_page((unsigned long)
+				vmbus_connection.monitor_pages[1]);
+		vmbus_connection.monitor_pages[1] = NULL;
+	}
 }
 
 /*
@@ -291,169 +400,86 @@ static struct vmbus_channel *pcpu_relid2channel(u32 relid)
  */
 struct vmbus_channel *relid2channel(u32 relid)
 {
-	struct vmbus_channel *channel;
-	struct vmbus_channel *found_channel  = NULL;
-	struct list_head *cur, *tmp;
-	struct vmbus_channel *cur_sc;
-
-	BUG_ON(!mutex_is_locked(&vmbus_connection.channel_mutex));
-
-	list_for_each_entry(channel, &vmbus_connection.chn_list, listentry) {
-		if (channel->offermsg.child_relid == relid) {
-			found_channel = channel;
-			break;
-		} else if (!list_empty(&channel->sc_list)) {
-			/*
-			 * Deal with sub-channels.
-			 */
-			list_for_each_safe(cur, tmp, &channel->sc_list) {
-				cur_sc = list_entry(cur, struct vmbus_channel,
-							sc_list);
-				if (cur_sc->offermsg.child_relid == relid) {
-					found_channel = cur_sc;
-					break;
-				}
-			}
-		}
+	if (vmbus_connection.channels == NULL) {
+		pr_warn_once("relid2channel: relid=%d: No channels mapped!\n", relid);
+		return NULL;
 	}
-
-	return found_channel;
+	if (WARN_ON(relid >= MAX_CHANNEL_RELIDS))
+		return NULL;
+	return READ_ONCE(vmbus_connection.channels[relid]);
 }
 
 /*
- * process_chn_event - Process a channel event notification
- */
-static void process_chn_event(u32 relid)
-{
-	struct vmbus_channel *channel;
-	void *arg;
-	bool read_state;
-	u32 bytes_to_read;
-
-	/*
-	 * Find the channel based on this relid and invokes the
-	 * channel callback to process the event
-	 */
-	channel = pcpu_relid2channel(relid);
-
-	if (!channel)
-		return;
-
-	/*
-	 * A channel once created is persistent even when there
-	 * is no driver handling the device. An unloading driver
-	 * sets the onchannel_callback to NULL on the same CPU
-	 * as where this interrupt is handled (in an interrupt context).
-	 * Thus, checking and invoking the driver specific callback takes
-	 * care of orderly unloading of the driver.
-	 */
-
-	if (channel->onchannel_callback != NULL) {
-		arg = channel->channel_callback_context;
-		read_state = channel->batched_reading;
-		/*
-		 * This callback reads the messages sent by the host.
-		 * We can optimize host to guest signaling by ensuring:
-		 * 1. While reading the channel, we disable interrupts from
-		 *    host.
-		 * 2. Ensure that we process all posted messages from the host
-		 *    before returning from this callback.
-		 * 3. Once we return, enable signaling from the host. Once this
-		 *    state is set we check to see if additional packets are
-		 *    available to read. In this case we repeat the process.
-		 */
-
-		do {
-			if (read_state)
-				hv_begin_read(&channel->inbound);
-			channel->onchannel_callback(arg);
-			if (read_state)
-				bytes_to_read = hv_end_read(&channel->inbound);
-			else
-				bytes_to_read = 0;
-		} while (read_state && (bytes_to_read != 0));
-	}
-}
-
-/*
- * vmbus_on_event - Handler for events
+ * vmbus_on_event - Process a channel event notification
+ *
+ * For batched channels (default) optimize host to guest signaling
+ * by ensuring:
+ * 1. While reading the channel, we disable interrupts from host.
+ * 2. Ensure that we process all posted messages from the host
+ *    before returning from this callback.
+ * 3. Once we return, enable signaling from the host. Once this
+ *    state is set we check to see if additional packets are
+ *    available to read. In this case we repeat the process.
+ *    If this tasklet has been running for a long time
+ *    then reschedule ourselves.
  */
 void vmbus_on_event(unsigned long data)
 {
-	u32 dword;
-	u32 maxdword;
-	int bit;
-	u32 relid;
-	u32 *recv_int_page = NULL;
-	void *page_addr;
-	int cpu = smp_processor_id();
-	union hv_synic_event_flags *event;
+	struct vmbus_channel *channel = (void *) data;
+	void (*callback_fn)(void *context);
 
-	if (vmbus_proto_version < VERSION_WIN8) {
-		maxdword = MAX_NUM_CHANNELS_SUPPORTED >> 5;
-		recv_int_page = vmbus_connection.recv_int_page;
-	} else {
-		/*
-		 * When the host is win8 and beyond, the event page
-		 * can be directly checked to get the id of the channel
-		 * that has the interrupt pending.
-		 */
-		maxdword = HV_EVENT_FLAGS_DWORD_COUNT;
-		page_addr = hv_context.synic_event_page[cpu];
-		event = (union hv_synic_event_flags *)page_addr +
-						 VMBUS_MESSAGE_SINT;
-		recv_int_page = event->flags32;
-	}
+	trace_vmbus_on_event(channel);
 
+	hv_debug_delay_test(channel, INTERRUPT_DELAY);
 
-
-	/* Check events */
-	if (!recv_int_page)
+	/* A channel once created is persistent even when
+	 * there is no driver handling the device. An
+	 * unloading driver sets the onchannel_callback to NULL.
+	 */
+	callback_fn = READ_ONCE(channel->onchannel_callback);
+	if (unlikely(!callback_fn))
 		return;
-	for (dword = 0; dword < maxdword; dword++) {
-		if (!recv_int_page[dword])
-			continue;
-		for (bit = 0; bit < 32; bit++) {
-			if (sync_test_and_clear_bit(bit,
-				(unsigned long *)&recv_int_page[dword])) {
-				relid = (dword << 5) + bit;
 
-				if (relid == 0)
-					/*
-					 * Special case - vmbus
-					 * channel protocol msg
-					 */
-					continue;
+	(*callback_fn)(channel->channel_callback_context);
 
-				process_chn_event(relid);
-			}
-		}
-	}
+	if (channel->callback_mode != HV_CALL_BATCHED)
+		return;
+
+	if (likely(hv_end_read(&channel->inbound) == 0))
+		return;
+
+	hv_begin_read(&channel->inbound);
+	tasklet_schedule(&channel->callback_event);
 }
 
 /*
  * vmbus_post_msg - Send a msg on the vmbus's message connection
  */
-int vmbus_post_msg(void *buffer, size_t buflen)
+int vmbus_post_msg(void *buffer, size_t buflen, bool can_sleep)
 {
+	struct vmbus_channel_message_header *hdr;
 	union hv_connection_id conn_id;
 	int ret = 0;
 	int retries = 0;
-	u32 msec = 1;
+	u32 usec = 1;
 
 	conn_id.asu32 = 0;
-	conn_id.u.id = VMBUS_MESSAGE_CONNECTION_ID;
+	conn_id.u.id = vmbus_connection.msg_conn_id;
 
 	/*
 	 * hv_post_message() can have transient failures because of
 	 * insufficient resources. Retry the operation a couple of
 	 * times before giving up.
 	 */
-	while (retries < 20) {
+	while (retries < 100) {
 		ret = hv_post_message(conn_id, 1, buffer, buflen);
 
 		switch (ret) {
 		case HV_STATUS_INVALID_CONNECTION_ID:
+			/* Allow INITIATE_CONTACT to try another connection ID. */
+			hdr = buffer;
+			if (hdr->msgtype == CHANNELMSG_INITIATE_CONTACT)
+				return -ENXIO;
 			/*
 			 * We could get this if we send messages too
 			 * frequently.
@@ -462,7 +488,7 @@ int vmbus_post_msg(void *buffer, size_t buflen)
 			break;
 		case HV_STATUS_INSUFFICIENT_MEMORY:
 		case HV_STATUS_INSUFFICIENT_BUFFERS:
-			ret = -ENOMEM;
+			ret = -ENOBUFS;
 			break;
 		case HV_STATUS_SUCCESS:
 			return ret;
@@ -472,9 +498,15 @@ int vmbus_post_msg(void *buffer, size_t buflen)
 		}
 
 		retries++;
-		msleep(msec);
-		if (msec < 2048)
-			msec *= 2;
+		if (can_sleep && usec > 1000)
+			msleep(usec / 1000);
+		else if (usec < MAX_UDELAY_MS * 1000)
+			udelay(usec);
+		else
+			mdelay(usec / 1000);
+
+		if (retries < 22)
+			usec *= 2;
 	}
 	return ret;
 }
@@ -486,13 +518,25 @@ void vmbus_set_event(struct vmbus_channel *channel)
 {
 	u32 child_relid = channel->offermsg.child_relid;
 
-	if (!channel->is_dedicated_interrupt) {
-		/* Each u32 represents 32 channels */
-		sync_set_bit(child_relid & 31,
-			(unsigned long *)vmbus_connection.send_int_page +
-			(child_relid >> 5));
-	}
+	if (!channel->is_dedicated_interrupt)
+		vmbus_send_interrupt(child_relid);
 
-	hv_do_hypercall(HVCALL_SIGNAL_EVENT, channel->sig_event, NULL);
+	++channel->sig_events;
+
+	if (ms_hyperv.paravisor_present) {
+		if (hv_isolation_type_snp())
+			hv_ghcb_hypercall(HVCALL_SIGNAL_EVENT, &channel->sig_event,
+					  NULL, sizeof(channel->sig_event));
+		else if (hv_isolation_type_tdx())
+			hv_tdx_hypercall(HVCALL_SIGNAL_EVENT | HV_HYPERCALL_FAST_BIT,
+					 channel->sig_event, 0);
+		else
+			WARN_ON_ONCE(1);
+	} else {
+		u64 control = HVCALL_SIGNAL_EVENT;
+
+		control |= hv_nested ? HV_HYPERCALL_NESTED : 0;
+		hv_do_fast_hypercall8(control, channel->sig_event);
+	}
 }
 EXPORT_SYMBOL_GPL(vmbus_set_event);

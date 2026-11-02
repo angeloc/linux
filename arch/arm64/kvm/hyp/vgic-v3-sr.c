@@ -1,43 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012-2015 - ARM Ltd
  * Author: Marc Zyngier <marc.zyngier@arm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+
+#include <hyp/adjust_pc.h>
 
 #include <linux/compiler.h>
 #include <linux/irqchip/arm-gic-v3.h>
 #include <linux/kvm_host.h>
 
+#include <asm/kvm_emulate.h>
 #include <asm/kvm_hyp.h>
+#include <asm/kvm_mmu.h>
 
-#define vtr_to_max_lr_idx(v)		((v) & 0xf)
-#define vtr_to_nr_pri_bits(v)		(((u32)(v) >> 29) + 1)
+#include "../../vgic/vgic.h"
 
-#define read_gicreg(r)							\
-	({								\
-		u64 reg;						\
-		asm volatile("mrs_s %0, " __stringify(r) : "=r" (reg));	\
-		reg;							\
-	})
+#define vtr_to_max_lr_idx(v)		FIELD_GET(ICH_VTR_EL2_ListRegs, (v))
+#define vtr_to_nr_pre_bits(v)		(FIELD_GET(ICH_VTR_EL2_PREbits, (v)) + 1)
+#define vtr_to_nr_apr_regs(v)		BIT(vtr_to_nr_pre_bits(v) - 5)
 
-#define write_gicreg(v,r)						\
-	do {								\
-		u64 __val = (v);					\
-		asm volatile("msr_s " __stringify(r) ", %0" : : "r" (__val));\
-	} while (0)
-
-static u64 __hyp_text __gic_v3_get_lr(unsigned int lr)
+u64 __gic_v3_get_lr(unsigned int lr)
 {
 	switch (lr & 0xf) {
 	case 0:
@@ -77,7 +60,7 @@ static u64 __hyp_text __gic_v3_get_lr(unsigned int lr)
 	unreachable();
 }
 
-static void __hyp_text __gic_v3_set_lr(u64 val, int lr)
+void __gic_v3_set_lr(u64 val, int lr)
 {
 	switch (lr & 0xf) {
 	case 0:
@@ -131,213 +114,1159 @@ static void __hyp_text __gic_v3_set_lr(u64 val, int lr)
 	}
 }
 
-static void __hyp_text save_maint_int_state(struct kvm_vcpu *vcpu, int nr_lr)
+static void __vgic_v3_write_ap0rn(u32 val, int n)
 {
-	struct vgic_v3_cpu_if *cpu_if = &vcpu->arch.vgic_cpu.vgic_v3;
-	int i;
-	bool expect_mi;
-
-	expect_mi = !!(cpu_if->vgic_hcr & ICH_HCR_UIE);
-
-	for (i = 0; i < nr_lr; i++) {
-		if (!(vcpu->arch.vgic_cpu.live_lrs & (1UL << i)))
-				continue;
-
-		expect_mi |= (!(cpu_if->vgic_lr[i] & ICH_LR_HW) &&
-			      (cpu_if->vgic_lr[i] & ICH_LR_EOI));
-	}
-
-	if (expect_mi) {
-		cpu_if->vgic_misr  = read_gicreg(ICH_MISR_EL2);
-
-		if (cpu_if->vgic_misr & ICH_MISR_EOI)
-			cpu_if->vgic_eisr = read_gicreg(ICH_EISR_EL2);
-		else
-			cpu_if->vgic_eisr = 0;
-	} else {
-		cpu_if->vgic_misr = 0;
-		cpu_if->vgic_eisr = 0;
+	switch (n) {
+	case 0:
+		write_gicreg(val, ICH_AP0R0_EL2);
+		break;
+	case 1:
+		write_gicreg(val, ICH_AP0R1_EL2);
+		break;
+	case 2:
+		write_gicreg(val, ICH_AP0R2_EL2);
+		break;
+	case 3:
+		write_gicreg(val, ICH_AP0R3_EL2);
+		break;
 	}
 }
 
-void __hyp_text __vgic_v3_save_state(struct kvm_vcpu *vcpu)
+static void __vgic_v3_write_ap1rn(u32 val, int n)
 {
-	struct vgic_v3_cpu_if *cpu_if = &vcpu->arch.vgic_cpu.vgic_v3;
-	u64 val;
+	switch (n) {
+	case 0:
+		write_gicreg(val, ICH_AP1R0_EL2);
+		break;
+	case 1:
+		write_gicreg(val, ICH_AP1R1_EL2);
+		break;
+	case 2:
+		write_gicreg(val, ICH_AP1R2_EL2);
+		break;
+	case 3:
+		write_gicreg(val, ICH_AP1R3_EL2);
+		break;
+	}
+}
+
+static u32 __vgic_v3_read_ap0rn(int n)
+{
+	u32 val;
+
+	switch (n) {
+	case 0:
+		val = read_gicreg(ICH_AP0R0_EL2);
+		break;
+	case 1:
+		val = read_gicreg(ICH_AP0R1_EL2);
+		break;
+	case 2:
+		val = read_gicreg(ICH_AP0R2_EL2);
+		break;
+	case 3:
+		val = read_gicreg(ICH_AP0R3_EL2);
+		break;
+	default:
+		unreachable();
+	}
+
+	return val;
+}
+
+static u32 __vgic_v3_read_ap1rn(int n)
+{
+	u32 val;
+
+	switch (n) {
+	case 0:
+		val = read_gicreg(ICH_AP1R0_EL2);
+		break;
+	case 1:
+		val = read_gicreg(ICH_AP1R1_EL2);
+		break;
+	case 2:
+		val = read_gicreg(ICH_AP1R2_EL2);
+		break;
+	case 3:
+		val = read_gicreg(ICH_AP1R3_EL2);
+		break;
+	default:
+		unreachable();
+	}
+
+	return val;
+}
+
+static u64 compute_ich_hcr(struct vgic_v3_cpu_if *cpu_if)
+{
+	return cpu_if->vgic_hcr | vgic_ich_hcr_trap_bits();
+}
+
+void __vgic_v3_save_state(struct vgic_v3_cpu_if *cpu_if)
+{
+	u64 used_lrs = cpu_if->used_lrs;
 
 	/*
 	 * Make sure stores to the GIC via the memory mapped interface
-	 * are now visible to the system register interface.
+	 * are now visible to the system register interface when reading the
+	 * LRs, and when reading back the VMCR on non-VHE systems.
 	 */
-	if (!cpu_if->vgic_sre)
-		dsb(st);
+	if (used_lrs || !has_vhe()) {
+		if (!cpu_if->vgic_sre) {
+			dsb(sy);
+			isb();
+		}
+	}
 
-	cpu_if->vgic_vmcr  = read_gicreg(ICH_VMCR_EL2);
-
-	if (vcpu->arch.vgic_cpu.live_lrs) {
+	if (used_lrs) {
 		int i;
-		u32 max_lr_idx, nr_pri_bits;
+		u32 elrsr;
 
-		cpu_if->vgic_elrsr = read_gicreg(ICH_ELSR_EL2);
+		elrsr = read_gicreg(ICH_ELRSR_EL2);
 
-		write_gicreg(0, ICH_HCR_EL2);
-		val = read_gicreg(ICH_VTR_EL2);
-		max_lr_idx = vtr_to_max_lr_idx(val);
-		nr_pri_bits = vtr_to_nr_pri_bits(val);
-
-		save_maint_int_state(vcpu, max_lr_idx + 1);
-
-		for (i = 0; i <= max_lr_idx; i++) {
-			if (!(vcpu->arch.vgic_cpu.live_lrs & (1UL << i)))
-				continue;
-
-			if (cpu_if->vgic_elrsr & (1 << i))
+		for (i = 0; i < used_lrs; i++) {
+			if (elrsr & (1 << i))
 				cpu_if->vgic_lr[i] &= ~ICH_LR_STATE;
 			else
 				cpu_if->vgic_lr[i] = __gic_v3_get_lr(i);
 
 			__gic_v3_set_lr(0, i);
 		}
-
-		switch (nr_pri_bits) {
-		case 7:
-			cpu_if->vgic_ap0r[3] = read_gicreg(ICH_AP0R3_EL2);
-			cpu_if->vgic_ap0r[2] = read_gicreg(ICH_AP0R2_EL2);
-		case 6:
-			cpu_if->vgic_ap0r[1] = read_gicreg(ICH_AP0R1_EL2);
-		default:
-			cpu_if->vgic_ap0r[0] = read_gicreg(ICH_AP0R0_EL2);
-		}
-
-		switch (nr_pri_bits) {
-		case 7:
-			cpu_if->vgic_ap1r[3] = read_gicreg(ICH_AP1R3_EL2);
-			cpu_if->vgic_ap1r[2] = read_gicreg(ICH_AP1R2_EL2);
-		case 6:
-			cpu_if->vgic_ap1r[1] = read_gicreg(ICH_AP1R1_EL2);
-		default:
-			cpu_if->vgic_ap1r[0] = read_gicreg(ICH_AP1R0_EL2);
-		}
-
-		vcpu->arch.vgic_cpu.live_lrs = 0;
-	} else {
-		cpu_if->vgic_misr  = 0;
-		cpu_if->vgic_eisr  = 0;
-		cpu_if->vgic_elrsr = 0xffff;
-		cpu_if->vgic_ap0r[0] = 0;
-		cpu_if->vgic_ap0r[1] = 0;
-		cpu_if->vgic_ap0r[2] = 0;
-		cpu_if->vgic_ap0r[3] = 0;
-		cpu_if->vgic_ap1r[0] = 0;
-		cpu_if->vgic_ap1r[1] = 0;
-		cpu_if->vgic_ap1r[2] = 0;
-		cpu_if->vgic_ap1r[3] = 0;
 	}
 
-	val = read_gicreg(ICC_SRE_EL2);
-	write_gicreg(val | ICC_SRE_EL2_ENABLE, ICC_SRE_EL2);
+	cpu_if->vgic_vmcr = read_gicreg(ICH_VMCR_EL2);
 
-	if (!cpu_if->vgic_sre) {
-		/* Make sure ENABLE is set at EL2 before setting SRE at EL1 */
-		isb();
-		write_gicreg(1, ICC_SRE_EL1);
+	if (cpu_if->vgic_hcr & ICH_HCR_EL2_LRENPIE) {
+		u64 val = read_gicreg(ICH_HCR_EL2);
+		cpu_if->vgic_hcr &= ~ICH_HCR_EL2_EOIcount;
+		cpu_if->vgic_hcr |= val & ICH_HCR_EL2_EOIcount;
+	}
+
+	write_gicreg(0, ICH_HCR_EL2);
+
+	/*
+	 * Hack alert: On NV, this results in a trap so that the above write
+	 * actually takes effect... No synchronisation is necessary, as we
+	 * only care about the effects when this traps.
+	 */
+	read_gicreg(ICH_MISR_EL2);
+}
+
+void __vgic_v3_restore_state(struct vgic_v3_cpu_if *cpu_if)
+{
+	u64 used_lrs = cpu_if->used_lrs;
+	int i;
+
+	write_gicreg(compute_ich_hcr(cpu_if), ICH_HCR_EL2);
+
+	for (i = 0; i < used_lrs; i++)
+		__gic_v3_set_lr(cpu_if->vgic_lr[i], i);
+
+	/*
+	 * Ensure that writes to the LRs, and on non-VHE systems ensure that
+	 * the write to the VMCR in __vgic_v3_activate_traps(), will have
+	 * reached the (re)distributors. This ensure the guest will read the
+	 * correct values from the memory-mapped interface.
+	 */
+	if (used_lrs || !has_vhe()) {
+		if (!cpu_if->vgic_sre) {
+			isb();
+			dsb(sy);
+		}
 	}
 }
 
-void __hyp_text __vgic_v3_restore_state(struct kvm_vcpu *vcpu)
+void __vgic_v3_activate_traps(struct vgic_v3_cpu_if *cpu_if)
 {
-	struct vgic_v3_cpu_if *cpu_if = &vcpu->arch.vgic_cpu.vgic_v3;
-	u64 val;
-	u32 max_lr_idx, nr_pri_bits;
-	u16 live_lrs = 0;
-	int i;
-
 	/*
 	 * VFIQEn is RES1 if ICC_SRE_EL1.SRE is 1. This causes a
 	 * Group0 interrupt (as generated in GICv2 mode) to be
 	 * delivered as a FIQ to the guest, with potentially fatal
 	 * consequences. So we must make sure that ICC_SRE_EL1 has
 	 * been actually programmed with the value we want before
-	 * starting to mess with the rest of the GIC.
+	 * starting to mess with the rest of the GIC, and VMCR_EL2 in
+	 * particular.  This logic must be called before
+	 * __vgic_v3_restore_state().
+	 *
+	 * However, if the vgic is disabled (ICH_HCR_EL2.EN==0), no GIC is
+	 * provisioned at all. In order to prevent illegal accesses to the
+	 * system registers to trap to EL1 (duh), force ICC_SRE_EL1.SRE to 1
+	 * so that the trap bits can take effect. Yes, we *loves* the GIC.
 	 */
-	if (!cpu_if->vgic_sre) {
+	if (!(cpu_if->vgic_hcr & ICH_HCR_EL2_En)) {
+		write_gicreg(ICC_SRE_EL1_SRE, ICC_SRE_EL1);
+		isb();
+	} else if (!cpu_if->vgic_sre) {
 		write_gicreg(0, ICC_SRE_EL1);
 		isb();
+		write_gicreg(cpu_if->vgic_vmcr, ICH_VMCR_EL2);
+
+
+		if (has_vhe()) {
+			/*
+			 * Ensure that the write to the VMCR will have reached
+			 * the (re)distributors. This ensure the guest will
+			 * read the correct values from the memory-mapped
+			 * interface.
+			 */
+			isb();
+			dsb(sy);
+		}
 	}
 
-	val = read_gicreg(ICH_VTR_EL2);
-	max_lr_idx = vtr_to_max_lr_idx(val);
-	nr_pri_bits = vtr_to_nr_pri_bits(val);
-
-	for (i = 0; i <= max_lr_idx; i++) {
-		if (cpu_if->vgic_lr[i] & ICH_LR_STATE)
-			live_lrs |= (1 << i);
-	}
-
-	write_gicreg(cpu_if->vgic_vmcr, ICH_VMCR_EL2);
-
-	if (live_lrs) {
-		write_gicreg(cpu_if->vgic_hcr, ICH_HCR_EL2);
-
-		switch (nr_pri_bits) {
-		case 7:
-			write_gicreg(cpu_if->vgic_ap0r[3], ICH_AP0R3_EL2);
-			write_gicreg(cpu_if->vgic_ap0r[2], ICH_AP0R2_EL2);
-		case 6:
-			write_gicreg(cpu_if->vgic_ap0r[1], ICH_AP0R1_EL2);
-		default:
-			write_gicreg(cpu_if->vgic_ap0r[0], ICH_AP0R0_EL2);
-		}
-
-		switch (nr_pri_bits) {
-		case 7:
-			write_gicreg(cpu_if->vgic_ap1r[3], ICH_AP1R3_EL2);
-			write_gicreg(cpu_if->vgic_ap1r[2], ICH_AP1R2_EL2);
-		case 6:
-			write_gicreg(cpu_if->vgic_ap1r[1], ICH_AP1R1_EL2);
-		default:
-			write_gicreg(cpu_if->vgic_ap1r[0], ICH_AP1R0_EL2);
-		}
-
-		for (i = 0; i <= max_lr_idx; i++) {
-			if (!(live_lrs & (1 << i)))
-				continue;
-
-			__gic_v3_set_lr(cpu_if->vgic_lr[i], i);
-		}
+	/* Only disable SRE if the host implements the GICv2 interface */
+	if (static_branch_unlikely(&vgic_v3_has_v2_compat)) {
+		/*
+		 * Prevent the guest from touching the ICC_SRE_EL1 system
+		 * register. Note that this may not have any effect, as
+		 * ICC_SRE_EL2.Enable being RAO/WI is a valid implementation.
+		 */
+		write_gicreg(read_gicreg(ICC_SRE_EL2) & ~ICC_SRE_EL2_ENABLE,
+			     ICC_SRE_EL2);
 	}
 
 	/*
-	 * Ensures that the above will have reached the
-	 * (re)distributors. This ensure the guest will read the
-	 * correct values from the memory-mapped interface.
+	 * If we need to trap system registers, we must write ICH_HCR_EL2
+	 * anyway, even if no interrupts are being injected. Note that this
+	 * also applies if we don't expect any system register access (no
+	 * vgic at all). In any case, no need to provide MI configuration.
 	 */
-	if (!cpu_if->vgic_sre) {
-		isb();
-		dsb(sy);
-	}
-	vcpu->arch.vgic_cpu.live_lrs = live_lrs;
-
-	/*
-	 * Prevent the guest from touching the GIC system registers if
-	 * SRE isn't enabled for GICv3 emulation.
-	 */
-	write_gicreg(read_gicreg(ICC_SRE_EL2) & ~ICC_SRE_EL2_ENABLE,
-		     ICC_SRE_EL2);
+	if (static_branch_unlikely(&vgic_v3_cpuif_trap) ||
+	    cpu_if->its_vpe.its_vm || !cpu_if->vgic_sre)
+		write_gicreg(vgic_ich_hcr_trap_bits() | ICH_HCR_EL2_En, ICH_HCR_EL2);
 }
 
-void __hyp_text __vgic_v3_init_lrs(void)
+void __vgic_v3_deactivate_traps(struct vgic_v3_cpu_if *cpu_if)
 {
-	int max_lr_idx = vtr_to_max_lr_idx(read_gicreg(ICH_VTR_EL2));
+	u64 val;
+
+	/* Only restore SRE if the host implements the GICv2 interface */
+	if (static_branch_unlikely(&vgic_v3_has_v2_compat)) {
+		val = read_gicreg(ICC_SRE_EL2);
+		write_gicreg(val | ICC_SRE_EL2_ENABLE, ICC_SRE_EL2);
+
+		if (!cpu_if->vgic_sre) {
+			/* Make sure ENABLE is set at EL2 before setting SRE at EL1 */
+			isb();
+			write_gicreg(1, ICC_SRE_EL1);
+		}
+	}
+
+	/*
+	 * If we were trapping system registers, we enabled the VGIC even if
+	 * no interrupts were being injected, and we disable it again here.
+	 */
+	if (static_branch_unlikely(&vgic_v3_cpuif_trap) ||
+	    cpu_if->its_vpe.its_vm || !cpu_if->vgic_sre)
+		write_gicreg(0, ICH_HCR_EL2);
+}
+
+void __vgic_v3_save_aprs(struct vgic_v3_cpu_if *cpu_if)
+{
+	u64 val;
+	u32 nr_pre_bits;
+
+	val = vgic_ich_vtr();
+	nr_pre_bits = vtr_to_nr_pre_bits(val);
+
+	switch (nr_pre_bits) {
+	case 7:
+		cpu_if->vgic_ap0r[3] = __vgic_v3_read_ap0rn(3);
+		cpu_if->vgic_ap0r[2] = __vgic_v3_read_ap0rn(2);
+		fallthrough;
+	case 6:
+		cpu_if->vgic_ap0r[1] = __vgic_v3_read_ap0rn(1);
+		fallthrough;
+	default:
+		cpu_if->vgic_ap0r[0] = __vgic_v3_read_ap0rn(0);
+	}
+
+	switch (nr_pre_bits) {
+	case 7:
+		cpu_if->vgic_ap1r[3] = __vgic_v3_read_ap1rn(3);
+		cpu_if->vgic_ap1r[2] = __vgic_v3_read_ap1rn(2);
+		fallthrough;
+	case 6:
+		cpu_if->vgic_ap1r[1] = __vgic_v3_read_ap1rn(1);
+		fallthrough;
+	default:
+		cpu_if->vgic_ap1r[0] = __vgic_v3_read_ap1rn(0);
+	}
+}
+
+static void __vgic_v3_restore_aprs(struct vgic_v3_cpu_if *cpu_if)
+{
+	u64 val;
+	u32 nr_pre_bits;
+
+	val = vgic_ich_vtr();
+	nr_pre_bits = vtr_to_nr_pre_bits(val);
+
+	switch (nr_pre_bits) {
+	case 7:
+		__vgic_v3_write_ap0rn(cpu_if->vgic_ap0r[3], 3);
+		__vgic_v3_write_ap0rn(cpu_if->vgic_ap0r[2], 2);
+		fallthrough;
+	case 6:
+		__vgic_v3_write_ap0rn(cpu_if->vgic_ap0r[1], 1);
+		fallthrough;
+	default:
+		__vgic_v3_write_ap0rn(cpu_if->vgic_ap0r[0], 0);
+	}
+
+	switch (nr_pre_bits) {
+	case 7:
+		__vgic_v3_write_ap1rn(cpu_if->vgic_ap1r[3], 3);
+		__vgic_v3_write_ap1rn(cpu_if->vgic_ap1r[2], 2);
+		fallthrough;
+	case 6:
+		__vgic_v3_write_ap1rn(cpu_if->vgic_ap1r[1], 1);
+		fallthrough;
+	default:
+		__vgic_v3_write_ap1rn(cpu_if->vgic_ap1r[0], 0);
+	}
+}
+
+void __vgic_v3_init_lrs(void)
+{
+	int max_lr_idx = vtr_to_max_lr_idx(vgic_ich_vtr());
 	int i;
 
 	for (i = 0; i <= max_lr_idx; i++)
 		__gic_v3_set_lr(0, i);
 }
 
-static u64 __hyp_text __vgic_v3_read_ich_vtr_el2(void)
+/* Return true if GICv3 is MMIO (GICv2) capable, false otherwise */
+bool __vgic_v3_get_gic_config(void)
 {
-	return read_gicreg(ICH_VTR_EL2);
+	u64 val, sre;
+	unsigned long flags = 0;
+
+	sre = read_gicreg(ICC_SRE_EL1);
+	/*
+	 * To check whether we have a MMIO-based (GICv2 compatible)
+	 * CPU interface, we need to disable the system register
+	 * view.
+	 *
+	 * Table 11-2 "Permitted ICC_SRE_ELx.SRE settings" indicates
+	 * that to be able to set ICC_SRE_EL1.SRE to 0, all the
+	 * interrupt overrides must be set. You've got to love this.
+	 *
+	 * As we always run VHE with HCR_xMO set, no extra xMO
+	 * manipulation is required in that case.
+	 *
+	 * To safely disable SRE, we have to prevent any interrupt
+	 * from firing (which would be deadly). This only makes sense
+	 * on VHE, as interrupts are already masked for nVHE as part
+	 * of the exception entry to EL2.
+	 */
+	if (has_vhe()) {
+		flags = local_daif_save();
+	} else {
+		sysreg_clear_set_hcr(0, HCR_EL2_AMO | HCR_EL2_FMO | HCR_EL2_IMO);
+		isb();
+	}
+
+	write_gicreg(0, ICC_SRE_EL1);
+	isb();
+
+	val = read_gicreg(ICC_SRE_EL1);
+
+	write_gicreg(sre, ICC_SRE_EL1);
+	isb();
+
+	if (has_vhe()) {
+		local_daif_restore(flags);
+	} else {
+		sysreg_clear_set_hcr(HCR_EL2_AMO | HCR_EL2_FMO | HCR_EL2_IMO, 0);
+		isb();
+	}
+
+	return !(val & ICC_SRE_EL1_SRE);
 }
 
-__alias(__vgic_v3_read_ich_vtr_el2) u64 __vgic_v3_get_ich_vtr_el2(void);
+static void __vgic_v3_compat_mode_enable(void)
+{
+	if (!cpus_have_final_cap(ARM64_HAS_GICV5_CPUIF))
+		return;
+
+	sysreg_clear_set_s(SYS_ICH_VCTLR_EL2, 0, ICH_VCTLR_EL2_V3);
+	/* Wait for V3 to become enabled */
+	isb();
+}
+
+static u64 __vgic_v3_read_vmcr(void)
+{
+	return read_gicreg(ICH_VMCR_EL2);
+}
+
+static void __vgic_v3_write_vmcr(u32 vmcr)
+{
+	write_gicreg(vmcr, ICH_VMCR_EL2);
+}
+
+void __vgic_v3_restore_vmcr_aprs(struct vgic_v3_cpu_if *cpu_if)
+{
+	__vgic_v3_compat_mode_enable();
+
+	/*
+	 * If dealing with a GICv2 emulation on GICv3, VMCR_EL2.VFIQen
+	 * is dependent on ICC_SRE_EL1.SRE, and we have to perform the
+	 * VMCR_EL2 save/restore in the world switch.
+	 */
+	if (cpu_if->vgic_sre)
+		__vgic_v3_write_vmcr(cpu_if->vgic_vmcr);
+	__vgic_v3_restore_aprs(cpu_if);
+}
+
+static int __vgic_v3_bpr_min(void)
+{
+	/* See Pseudocode for VPriorityGroup */
+	return 8 - vtr_to_nr_pre_bits(vgic_ich_vtr());
+}
+
+static int __vgic_v3_get_group(struct kvm_vcpu *vcpu)
+{
+	u64 esr = kvm_vcpu_get_esr(vcpu);
+	u8 crm = (esr & ESR_ELx_SYS64_ISS_CRM_MASK) >> ESR_ELx_SYS64_ISS_CRM_SHIFT;
+
+	return crm != 8;
+}
+
+#define GICv3_IDLE_PRIORITY	0xff
+
+static int __vgic_v3_highest_priority_lr(struct kvm_vcpu *vcpu, u32 vmcr,
+					 u64 *lr_val)
+{
+	unsigned int used_lrs = vcpu->arch.vgic_cpu.vgic_v3.used_lrs;
+	u8 priority = GICv3_IDLE_PRIORITY;
+	int i, lr = -1;
+
+	for (i = 0; i < used_lrs; i++) {
+		u64 val = __gic_v3_get_lr(i);
+		u8 lr_prio = (val & ICH_LR_PRIORITY_MASK) >> ICH_LR_PRIORITY_SHIFT;
+
+		/* Not pending in the state? */
+		if ((val & ICH_LR_STATE) != ICH_LR_PENDING_BIT)
+			continue;
+
+		/* Group-0 interrupt, but Group-0 disabled? */
+		if (!(val & ICH_LR_GROUP) && !(vmcr & ICH_VMCR_EL2_VENG0_MASK))
+			continue;
+
+		/* Group-1 interrupt, but Group-1 disabled? */
+		if ((val & ICH_LR_GROUP) && !(vmcr & ICH_VMCR_EL2_VENG1_MASK))
+			continue;
+
+		/* Not the highest priority? */
+		if (lr_prio >= priority)
+			continue;
+
+		/* This is a candidate */
+		priority = lr_prio;
+		*lr_val = val;
+		lr = i;
+	}
+
+	if (lr == -1)
+		*lr_val = ICC_IAR1_EL1_SPURIOUS;
+
+	return lr;
+}
+
+static int __vgic_v3_find_active_lr(struct kvm_vcpu *vcpu, int intid,
+				    u64 *lr_val)
+{
+	unsigned int used_lrs = vcpu->arch.vgic_cpu.vgic_v3.used_lrs;
+	int i;
+
+	for (i = 0; i < used_lrs; i++) {
+		u64 val = __gic_v3_get_lr(i);
+
+		if ((val & ICH_LR_VIRTUAL_ID_MASK) == intid &&
+		    (val & ICH_LR_ACTIVE_BIT)) {
+			*lr_val = val;
+			return i;
+		}
+	}
+
+	*lr_val = ICC_IAR1_EL1_SPURIOUS;
+	return -1;
+}
+
+static int __vgic_v3_get_highest_active_priority(void)
+{
+	u8 nr_apr_regs = vtr_to_nr_apr_regs(vgic_ich_vtr());
+	u32 hap = 0;
+	int i;
+
+	for (i = 0; i < nr_apr_regs; i++) {
+		u32 val;
+
+		/*
+		 * The ICH_AP0Rn_EL2 and ICH_AP1Rn_EL2 registers
+		 * contain the active priority levels for this VCPU
+		 * for the maximum number of supported priority
+		 * levels, and we return the full priority level only
+		 * if the BPR is programmed to its minimum, otherwise
+		 * we return a combination of the priority level and
+		 * subpriority, as determined by the setting of the
+		 * BPR, but without the full subpriority.
+		 */
+		val  = __vgic_v3_read_ap0rn(i);
+		val |= __vgic_v3_read_ap1rn(i);
+		if (!val) {
+			hap += 32;
+			continue;
+		}
+
+		return (hap + __ffs(val)) << __vgic_v3_bpr_min();
+	}
+
+	return GICv3_IDLE_PRIORITY;
+}
+
+static unsigned int __vgic_v3_get_bpr0(u32 vmcr)
+{
+	return FIELD_GET(ICH_VMCR_EL2_VBPR0, vmcr);
+}
+
+static unsigned int __vgic_v3_get_bpr1(u32 vmcr)
+{
+	unsigned int bpr;
+
+	if (vmcr & ICH_VMCR_EL2_VCBPR_MASK) {
+		bpr = __vgic_v3_get_bpr0(vmcr);
+		if (bpr < 7)
+			bpr++;
+	} else {
+		bpr = FIELD_GET(ICH_VMCR_EL2_VBPR1, vmcr);
+	}
+
+	return bpr;
+}
+
+/*
+ * Convert a priority to a preemption level, taking the relevant BPR
+ * into account by zeroing the sub-priority bits.
+ */
+static u8 __vgic_v3_pri_to_pre(u8 pri, u32 vmcr, int grp)
+{
+	unsigned int bpr;
+
+	if (!grp)
+		bpr = __vgic_v3_get_bpr0(vmcr) + 1;
+	else
+		bpr = __vgic_v3_get_bpr1(vmcr);
+
+	return pri & (GENMASK(7, 0) << bpr);
+}
+
+/*
+ * The priority value is independent of any of the BPR values, so we
+ * normalize it using the minimal BPR value. This guarantees that no
+ * matter what the guest does with its BPR, we can always set/get the
+ * same value of a priority.
+ */
+static void __vgic_v3_set_active_priority(u8 pri, u32 vmcr, int grp)
+{
+	u8 pre, ap;
+	u32 val;
+	int apr;
+
+	pre = __vgic_v3_pri_to_pre(pri, vmcr, grp);
+	ap = pre >> __vgic_v3_bpr_min();
+	apr = ap / 32;
+
+	if (!grp) {
+		val = __vgic_v3_read_ap0rn(apr);
+		__vgic_v3_write_ap0rn(val | BIT(ap % 32), apr);
+	} else {
+		val = __vgic_v3_read_ap1rn(apr);
+		__vgic_v3_write_ap1rn(val | BIT(ap % 32), apr);
+	}
+}
+
+static int __vgic_v3_clear_highest_active_priority(void)
+{
+	u8 nr_apr_regs = vtr_to_nr_apr_regs(vgic_ich_vtr());
+	u32 hap = 0;
+	int i;
+
+	for (i = 0; i < nr_apr_regs; i++) {
+		u32 ap0, ap1;
+		int c0, c1;
+
+		ap0 = __vgic_v3_read_ap0rn(i);
+		ap1 = __vgic_v3_read_ap1rn(i);
+		if (!ap0 && !ap1) {
+			hap += 32;
+			continue;
+		}
+
+		c0 = ap0 ? __ffs(ap0) : 32;
+		c1 = ap1 ? __ffs(ap1) : 32;
+
+		/* Always clear the LSB, which is the highest priority */
+		if (c0 < c1) {
+			ap0 &= ~BIT(c0);
+			__vgic_v3_write_ap0rn(ap0, i);
+			hap += c0;
+		} else {
+			ap1 &= ~BIT(c1);
+			__vgic_v3_write_ap1rn(ap1, i);
+			hap += c1;
+		}
+
+		/* Rescale to 8 bits of priority */
+		return hap << __vgic_v3_bpr_min();
+	}
+
+	return GICv3_IDLE_PRIORITY;
+}
+
+static void __vgic_v3_read_iar(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u64 lr_val;
+	u8 lr_prio, pmr;
+	int lr, grp;
+
+	grp = __vgic_v3_get_group(vcpu);
+
+	lr = __vgic_v3_highest_priority_lr(vcpu, vmcr, &lr_val);
+	if (lr < 0)
+		goto spurious;
+
+	if (grp != !!(lr_val & ICH_LR_GROUP))
+		goto spurious;
+
+	pmr = FIELD_GET(ICH_VMCR_EL2_VPMR, vmcr);
+	lr_prio = (lr_val & ICH_LR_PRIORITY_MASK) >> ICH_LR_PRIORITY_SHIFT;
+	if (pmr <= lr_prio)
+		goto spurious;
+
+	if (__vgic_v3_get_highest_active_priority() <= __vgic_v3_pri_to_pre(lr_prio, vmcr, grp))
+		goto spurious;
+
+	lr_val &= ~ICH_LR_STATE;
+	lr_val |= ICH_LR_ACTIVE_BIT;
+	__gic_v3_set_lr(lr_val, lr);
+	__vgic_v3_set_active_priority(lr_prio, vmcr, grp);
+	vcpu_set_reg(vcpu, rt, lr_val & ICH_LR_VIRTUAL_ID_MASK);
+	return;
+
+spurious:
+	vcpu_set_reg(vcpu, rt, ICC_IAR1_EL1_SPURIOUS);
+}
+
+static void __vgic_v3_clear_active_lr(int lr, u64 lr_val)
+{
+	lr_val &= ~ICH_LR_ACTIVE_BIT;
+	if (lr_val & ICH_LR_HW) {
+		u32 pid;
+
+		pid = (lr_val & ICH_LR_PHYS_ID_MASK) >> ICH_LR_PHYS_ID_SHIFT;
+		gic_write_dir(pid);
+	}
+
+	__gic_v3_set_lr(lr_val, lr);
+}
+
+static void __vgic_v3_bump_eoicount(void)
+{
+	u32 hcr;
+
+	hcr = read_gicreg(ICH_HCR_EL2);
+	hcr += 1 << ICH_HCR_EL2_EOIcount_SHIFT;
+	write_gicreg(hcr, ICH_HCR_EL2);
+}
+
+static int ___vgic_v3_write_dir(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u32 vid = vcpu_get_reg(vcpu, rt);
+	u64 lr_val;
+	int lr;
+
+	/* EOImode == 0, nothing to be done here */
+	if (!(vmcr & ICH_VMCR_EL2_VEOIM_MASK))
+		return 1;
+
+	/* No deactivate to be performed on an LPI */
+	if (vid >= VGIC_MIN_LPI)
+		return 1;
+
+	lr = __vgic_v3_find_active_lr(vcpu, vid, &lr_val);
+	if (lr != -1) {
+		__vgic_v3_clear_active_lr(lr, lr_val);
+		return 1;
+	}
+
+	return 0;
+}
+
+static void __vgic_v3_write_dir(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	if (!___vgic_v3_write_dir(vcpu, vmcr, rt))
+		__vgic_v3_bump_eoicount();
+}
+
+static void __vgic_v3_write_eoir(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u32 vid = vcpu_get_reg(vcpu, rt);
+	u64 lr_val;
+	u8 lr_prio, act_prio;
+	int lr, grp;
+
+	grp = __vgic_v3_get_group(vcpu);
+
+	/* Drop priority in any case */
+	act_prio = __vgic_v3_clear_highest_active_priority();
+
+	lr = __vgic_v3_find_active_lr(vcpu, vid, &lr_val);
+	if (lr == -1) {
+		/* Do not bump EOIcount for LPIs that aren't in the LRs */
+		if (!(vid >= VGIC_MIN_LPI))
+			__vgic_v3_bump_eoicount();
+		return;
+	}
+
+	/* EOImode == 1 and not an LPI, nothing to be done here */
+	if ((vmcr & ICH_VMCR_EL2_VEOIM_MASK) && !(vid >= VGIC_MIN_LPI))
+		return;
+
+	lr_prio = (lr_val & ICH_LR_PRIORITY_MASK) >> ICH_LR_PRIORITY_SHIFT;
+
+	/* If priorities or group do not match, the guest has fscked-up. */
+	if (grp != !!(lr_val & ICH_LR_GROUP) ||
+	    __vgic_v3_pri_to_pre(lr_prio, vmcr, grp) != act_prio)
+		return;
+
+	/* Let's now perform the deactivation */
+	__vgic_v3_clear_active_lr(lr, lr_val);
+}
+
+static void __vgic_v3_read_igrpen0(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	vcpu_set_reg(vcpu, rt, FIELD_GET(ICH_VMCR_EL2_VENG0, vmcr));
+}
+
+static void __vgic_v3_read_igrpen1(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	vcpu_set_reg(vcpu, rt, FIELD_GET(ICH_VMCR_EL2_VENG1, vmcr));
+}
+
+static void __vgic_v3_write_igrpen0(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u64 val = vcpu_get_reg(vcpu, rt);
+
+	FIELD_MODIFY(ICH_VMCR_EL2_VENG0, &vmcr, val & 1);
+
+	__vgic_v3_write_vmcr(vmcr);
+}
+
+static void __vgic_v3_write_igrpen1(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u64 val = vcpu_get_reg(vcpu, rt);
+
+	FIELD_MODIFY(ICH_VMCR_EL2_VENG1, &vmcr, val & 1);
+
+	__vgic_v3_write_vmcr(vmcr);
+}
+
+static void __vgic_v3_read_bpr0(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	vcpu_set_reg(vcpu, rt, __vgic_v3_get_bpr0(vmcr));
+}
+
+static void __vgic_v3_read_bpr1(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	vcpu_set_reg(vcpu, rt, __vgic_v3_get_bpr1(vmcr));
+}
+
+static void __vgic_v3_write_bpr0(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u64 val = vcpu_get_reg(vcpu, rt);
+	u8 bpr_min = __vgic_v3_bpr_min() - 1;
+
+	/* Enforce BPR limiting */
+	if (val < bpr_min)
+		val = bpr_min;
+
+	FIELD_MODIFY(ICH_VMCR_EL2_VBPR0, &vmcr, val);
+
+	__vgic_v3_write_vmcr(vmcr);
+}
+
+static void __vgic_v3_write_bpr1(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u64 val = vcpu_get_reg(vcpu, rt);
+	u8 bpr_min = __vgic_v3_bpr_min();
+
+	if (FIELD_GET(ICH_VMCR_EL2_VCBPR, val))
+		return;
+
+	/* Enforce BPR limiting */
+	if (val < bpr_min)
+		val = bpr_min;
+
+	FIELD_MODIFY(ICH_VMCR_EL2_VBPR1, &vmcr, val);
+
+	__vgic_v3_write_vmcr(vmcr);
+}
+
+static void __vgic_v3_read_apxrn(struct kvm_vcpu *vcpu, int rt, int n)
+{
+	u32 val;
+
+	if (!__vgic_v3_get_group(vcpu))
+		val = __vgic_v3_read_ap0rn(n);
+	else
+		val = __vgic_v3_read_ap1rn(n);
+
+	vcpu_set_reg(vcpu, rt, val);
+}
+
+static void __vgic_v3_write_apxrn(struct kvm_vcpu *vcpu, int rt, int n)
+{
+	u32 val = vcpu_get_reg(vcpu, rt);
+
+	if (!__vgic_v3_get_group(vcpu))
+		__vgic_v3_write_ap0rn(val, n);
+	else
+		__vgic_v3_write_ap1rn(val, n);
+}
+
+static void __vgic_v3_read_apxr0(struct kvm_vcpu *vcpu,
+					    u32 vmcr, int rt)
+{
+	__vgic_v3_read_apxrn(vcpu, rt, 0);
+}
+
+static void __vgic_v3_read_apxr1(struct kvm_vcpu *vcpu,
+					    u32 vmcr, int rt)
+{
+	__vgic_v3_read_apxrn(vcpu, rt, 1);
+}
+
+static void __vgic_v3_read_apxr2(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	__vgic_v3_read_apxrn(vcpu, rt, 2);
+}
+
+static void __vgic_v3_read_apxr3(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	__vgic_v3_read_apxrn(vcpu, rt, 3);
+}
+
+static void __vgic_v3_write_apxr0(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	__vgic_v3_write_apxrn(vcpu, rt, 0);
+}
+
+static void __vgic_v3_write_apxr1(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	__vgic_v3_write_apxrn(vcpu, rt, 1);
+}
+
+static void __vgic_v3_write_apxr2(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	__vgic_v3_write_apxrn(vcpu, rt, 2);
+}
+
+static void __vgic_v3_write_apxr3(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	__vgic_v3_write_apxrn(vcpu, rt, 3);
+}
+
+static void __vgic_v3_read_hppir(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u64 lr_val;
+	int lr, lr_grp, grp;
+
+	grp = __vgic_v3_get_group(vcpu);
+
+	lr = __vgic_v3_highest_priority_lr(vcpu, vmcr, &lr_val);
+	if (lr == -1)
+		goto spurious;
+
+	lr_grp = !!(lr_val & ICH_LR_GROUP);
+	if (lr_grp != grp)
+		lr_val = ICC_IAR1_EL1_SPURIOUS;
+
+spurious:
+	vcpu_set_reg(vcpu, rt, lr_val & ICH_LR_VIRTUAL_ID_MASK);
+}
+
+static void __vgic_v3_read_pmr(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	vcpu_set_reg(vcpu, rt, FIELD_GET(ICH_VMCR_EL2_VPMR, vmcr));
+}
+
+static void __vgic_v3_write_pmr(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u32 val = vcpu_get_reg(vcpu, rt);
+
+	FIELD_MODIFY(ICH_VMCR_EL2_VPMR, &vmcr, val);
+
+	write_gicreg(vmcr, ICH_VMCR_EL2);
+}
+
+static void __vgic_v3_read_rpr(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u32 val = __vgic_v3_get_highest_active_priority();
+	vcpu_set_reg(vcpu, rt, val);
+}
+
+static void __vgic_v3_read_ctlr(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u32 vtr, val;
+
+	vtr = vgic_ich_vtr();
+	/* PRIbits */
+	val = ((vtr >> 29) & 7) << ICC_CTLR_EL1_PRI_BITS_SHIFT;
+	/* IDbits */
+	val |= ((vtr >> 23) & 7) << ICC_CTLR_EL1_ID_BITS_SHIFT;
+	/* A3V */
+	val |= ((vtr >> 21) & 1) << ICC_CTLR_EL1_A3V_SHIFT;
+	/* EOImode */
+	val |= FIELD_PREP(ICC_CTLR_EL1_EOImode_MASK,
+			  FIELD_GET(ICH_VMCR_EL2_VEOIM, vmcr));
+	/* CBPR */
+	val |= FIELD_PREP(ICC_CTLR_EL1_CBPR_MASK,
+			FIELD_GET(ICH_VMCR_EL2_VCBPR, vmcr));
+
+	vcpu_set_reg(vcpu, rt, val);
+}
+
+static void __vgic_v3_write_ctlr(struct kvm_vcpu *vcpu, u32 vmcr, int rt)
+{
+	u32 val = vcpu_get_reg(vcpu, rt);
+
+	FIELD_MODIFY(ICH_VMCR_EL2_VCBPR, &vmcr,
+		     FIELD_GET(ICC_CTLR_EL1_CBPR_MASK, val));
+
+	FIELD_MODIFY(ICH_VMCR_EL2_VEOIM, &vmcr,
+		     FIELD_GET(ICC_CTLR_EL1_EOImode_MASK, val));
+
+	write_gicreg(vmcr, ICH_VMCR_EL2);
+}
+
+static bool __vgic_v3_check_trap_forwarding(struct kvm_vcpu *vcpu,
+					    u32 sysreg, bool is_read)
+{
+	u64 ich_hcr;
+
+	if (!is_nested_ctxt(vcpu))
+		return false;
+
+	ich_hcr = __vcpu_sys_reg(vcpu, ICH_HCR_EL2);
+
+	switch (sysreg) {
+	case SYS_ICC_IGRPEN0_EL1:
+		if (is_read &&
+		    (__vcpu_sys_reg(vcpu, HFGRTR_EL2) & HFGRTR_EL2_ICC_IGRPENn_EL1))
+			return true;
+
+		if (!is_read &&
+		    (__vcpu_sys_reg(vcpu, HFGWTR_EL2) & HFGWTR_EL2_ICC_IGRPENn_EL1))
+			return true;
+
+		fallthrough;
+
+	case SYS_ICC_AP0Rn_EL1(0):
+	case SYS_ICC_AP0Rn_EL1(1):
+	case SYS_ICC_AP0Rn_EL1(2):
+	case SYS_ICC_AP0Rn_EL1(3):
+	case SYS_ICC_BPR0_EL1:
+	case SYS_ICC_EOIR0_EL1:
+	case SYS_ICC_HPPIR0_EL1:
+	case SYS_ICC_IAR0_EL1:
+		return ich_hcr & ICH_HCR_EL2_TALL0;
+
+	case SYS_ICC_IGRPEN1_EL1:
+		if (is_read &&
+		    (__vcpu_sys_reg(vcpu, HFGRTR_EL2) & HFGRTR_EL2_ICC_IGRPENn_EL1))
+			return true;
+
+		if (!is_read &&
+		    (__vcpu_sys_reg(vcpu, HFGWTR_EL2) & HFGWTR_EL2_ICC_IGRPENn_EL1))
+			return true;
+
+		fallthrough;
+
+	case SYS_ICC_AP1Rn_EL1(0):
+	case SYS_ICC_AP1Rn_EL1(1):
+	case SYS_ICC_AP1Rn_EL1(2):
+	case SYS_ICC_AP1Rn_EL1(3):
+	case SYS_ICC_BPR1_EL1:
+	case SYS_ICC_EOIR1_EL1:
+	case SYS_ICC_HPPIR1_EL1:
+	case SYS_ICC_IAR1_EL1:
+		return ich_hcr & ICH_HCR_EL2_TALL1;
+
+	case SYS_ICC_DIR_EL1:
+		if (ich_hcr & ICH_HCR_EL2_TDIR)
+			return true;
+
+		fallthrough;
+
+	case SYS_ICC_RPR_EL1:
+	case SYS_ICC_CTLR_EL1:
+	case SYS_ICC_PMR_EL1:
+		return ich_hcr & ICH_HCR_EL2_TC;
+
+	default:
+		return false;
+	}
+}
+
+int __vgic_v3_perform_cpuif_access(struct kvm_vcpu *vcpu)
+{
+	int rt;
+	u64 esr;
+	u32 vmcr;
+	void (*fn)(struct kvm_vcpu *, u32, int);
+	bool is_read;
+	u32 sysreg;
+
+	if (kern_hyp_va(vcpu->kvm)->arch.vgic.vgic_model != KVM_DEV_TYPE_ARM_VGIC_V3)
+		return 0;
+
+	esr = kvm_vcpu_get_esr(vcpu);
+	if (vcpu_mode_is_32bit(vcpu)) {
+		if (!kvm_condition_valid(vcpu)) {
+			__kvm_skip_instr(vcpu);
+			return 1;
+		}
+
+		sysreg = esr_cp15_to_sysreg(esr);
+	} else {
+		sysreg = esr_sys64_to_sysreg(esr);
+	}
+
+	is_read = (esr & ESR_ELx_SYS64_ISS_DIR_MASK) == ESR_ELx_SYS64_ISS_DIR_READ;
+
+	if (__vgic_v3_check_trap_forwarding(vcpu, sysreg, is_read))
+		return 0;
+
+	switch (sysreg) {
+	case SYS_ICC_IAR0_EL1:
+	case SYS_ICC_IAR1_EL1:
+		if (unlikely(!is_read))
+			return 0;
+		fn = __vgic_v3_read_iar;
+		break;
+	case SYS_ICC_EOIR0_EL1:
+	case SYS_ICC_EOIR1_EL1:
+		if (unlikely(is_read))
+			return 0;
+		fn = __vgic_v3_write_eoir;
+		break;
+	case SYS_ICC_IGRPEN1_EL1:
+		if (is_read)
+			fn = __vgic_v3_read_igrpen1;
+		else
+			fn = __vgic_v3_write_igrpen1;
+		break;
+	case SYS_ICC_BPR1_EL1:
+		if (is_read)
+			fn = __vgic_v3_read_bpr1;
+		else
+			fn = __vgic_v3_write_bpr1;
+		break;
+	case SYS_ICC_AP0Rn_EL1(0):
+	case SYS_ICC_AP1Rn_EL1(0):
+		if (is_read)
+			fn = __vgic_v3_read_apxr0;
+		else
+			fn = __vgic_v3_write_apxr0;
+		break;
+	case SYS_ICC_AP0Rn_EL1(1):
+	case SYS_ICC_AP1Rn_EL1(1):
+		if (is_read)
+			fn = __vgic_v3_read_apxr1;
+		else
+			fn = __vgic_v3_write_apxr1;
+		break;
+	case SYS_ICC_AP0Rn_EL1(2):
+	case SYS_ICC_AP1Rn_EL1(2):
+		if (is_read)
+			fn = __vgic_v3_read_apxr2;
+		else
+			fn = __vgic_v3_write_apxr2;
+		break;
+	case SYS_ICC_AP0Rn_EL1(3):
+	case SYS_ICC_AP1Rn_EL1(3):
+		if (is_read)
+			fn = __vgic_v3_read_apxr3;
+		else
+			fn = __vgic_v3_write_apxr3;
+		break;
+	case SYS_ICC_HPPIR0_EL1:
+	case SYS_ICC_HPPIR1_EL1:
+		if (unlikely(!is_read))
+			return 0;
+		fn = __vgic_v3_read_hppir;
+		break;
+	case SYS_ICC_IGRPEN0_EL1:
+		if (is_read)
+			fn = __vgic_v3_read_igrpen0;
+		else
+			fn = __vgic_v3_write_igrpen0;
+		break;
+	case SYS_ICC_BPR0_EL1:
+		if (is_read)
+			fn = __vgic_v3_read_bpr0;
+		else
+			fn = __vgic_v3_write_bpr0;
+		break;
+	case SYS_ICC_DIR_EL1:
+		if (unlikely(is_read))
+			return 0;
+		/*
+		 * Full exit if required to handle overflow deactivation,
+		 * unless we can emulate it in the LRs (likely the majority
+		 * of the cases).
+		 */
+		if (vcpu->arch.vgic_cpu.vgic_v3.vgic_hcr & ICH_HCR_EL2_TDIR) {
+			int ret;
+
+			ret = ___vgic_v3_write_dir(vcpu, __vgic_v3_read_vmcr(),
+						   kvm_vcpu_sys_get_rt(vcpu));
+			if (ret)
+				__kvm_skip_instr(vcpu);
+
+			return ret;
+		}
+		fn = __vgic_v3_write_dir;
+		break;
+	case SYS_ICC_RPR_EL1:
+		if (unlikely(!is_read))
+			return 0;
+		fn = __vgic_v3_read_rpr;
+		break;
+	case SYS_ICC_CTLR_EL1:
+		if (is_read)
+			fn = __vgic_v3_read_ctlr;
+		else
+			fn = __vgic_v3_write_ctlr;
+		break;
+	case SYS_ICC_PMR_EL1:
+		if (is_read)
+			fn = __vgic_v3_read_pmr;
+		else
+			fn = __vgic_v3_write_pmr;
+		break;
+	default:
+		return 0;
+	}
+
+	vmcr = __vgic_v3_read_vmcr();
+	rt = kvm_vcpu_sys_get_rt(vcpu);
+	fn(vcpu, vmcr, rt);
+
+	__kvm_skip_instr(vcpu);
+
+	return 1;
+}

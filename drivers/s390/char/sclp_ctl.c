@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * IOCTL interface for SCLP
  *
@@ -6,14 +7,12 @@
  * Author: Michael Holzheu <holzheu@linux.vnet.ibm.com>
  */
 
-#include <linux/compat.h>
 #include <linux/uaccess.h>
 #include <linux/miscdevice.h>
 #include <linux/gfp.h>
-#include <linux/module.h>
+#include <linux/init.h>
 #include <linux/ioctl.h>
 #include <linux/fs.h>
-#include <asm/compat.h>
 #include <asm/sclp_ctl.h>
 #include <asm/sclp.h>
 
@@ -43,10 +42,7 @@ static int sclp_ctl_cmdw_supported(unsigned int cmdw)
 
 static void __user *u64_to_uptr(u64 value)
 {
-	if (is_compat_task())
-		return compat_ptr(value);
-	else
-		return (void __user *)(unsigned long)value;
+	return (void __user *)(unsigned long)value;
 }
 
 /*
@@ -95,10 +91,7 @@ static long sclp_ctl_ioctl(struct file *filp, unsigned int cmd,
 {
 	void __user *argp;
 
-	if (is_compat_task())
-		argp = compat_ptr(arg);
-	else
-		argp = (void __user *) arg;
+	argp = (void __user *)arg;
 	switch (cmd) {
 	case SCLP_CTL_SCCB:
 		return sclp_ctl_ioctl_sccb(argp);
@@ -114,8 +107,6 @@ static const struct file_operations sclp_ctl_fops = {
 	.owner = THIS_MODULE,
 	.open = nonseekable_open,
 	.unlocked_ioctl = sclp_ctl_ioctl,
-	.compat_ioctl = sclp_ctl_ioctl,
-	.llseek = no_llseek,
 };
 
 /*
@@ -126,21 +117,4 @@ static struct miscdevice sclp_ctl_device = {
 	.name = "sclp",
 	.fops = &sclp_ctl_fops,
 };
-
-/*
- * Register sclp_ctl misc device
- */
-static int __init sclp_ctl_init(void)
-{
-	return misc_register(&sclp_ctl_device);
-}
-module_init(sclp_ctl_init);
-
-/*
- * Deregister sclp_ctl misc device
- */
-static void __exit sclp_ctl_exit(void)
-{
-	misc_deregister(&sclp_ctl_device);
-}
-module_exit(sclp_ctl_exit);
+builtin_misc_device(sclp_ctl_device);

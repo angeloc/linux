@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * starfire.h: Group all starfire specific code together.
  *
@@ -7,7 +8,7 @@
 #ifndef _SPARC64_STARFIRE_H
 #define _SPARC64_STARFIRE_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 extern int this_is_starfire;
 

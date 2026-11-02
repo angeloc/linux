@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Touchscreen driver for Marvell 88PM860x
  *
  * Copyright (C) 2009 Marvell International Ltd.
  * 	Haojian Zhuang <haojian.zhuang@marvell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -120,13 +117,14 @@ static int pm860x_touch_dt_init(struct platform_device *pdev,
 					  struct pm860x_chip *chip,
 					  int *res_x)
 {
-	struct device_node *np = pdev->dev.parent->of_node;
 	struct i2c_client *i2c = (chip->id == CHIP_PM8607) ? chip->client \
 				 : chip->companion;
 	int data, n, ret;
-	if (!np)
+	if (!pdev->dev.parent->of_node)
 		return -ENODEV;
-	np = of_find_node_by_name(np, "touch");
+
+	struct device_node *np __free(device_node) =
+		of_get_child_by_name(pdev->dev.parent->of_node, "touch");
 	if (!np) {
 		dev_err(&pdev->dev, "Can't find touch node\n");
 		return -EINVAL;
@@ -164,6 +162,7 @@ static int pm860x_touch_dt_init(struct platform_device *pdev,
 			return -EINVAL;
 	}
 	of_property_read_u32(np, "marvell,88pm860x-resistor-X", res_x);
+
 	return 0;
 }
 #else
@@ -180,10 +179,8 @@ static int pm860x_touch_probe(struct platform_device *pdev)
 	int irq, ret, res_x = 0, data = 0;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "No IRQ resource!\n");
+	if (irq < 0)
 		return -EINVAL;
-	}
 
 	if (pm860x_touch_dt_init(pdev, chip, &res_x)) {
 		if (pdata) {
@@ -240,8 +237,6 @@ static int pm860x_touch_probe(struct platform_device *pdev)
 	if (!touch)
 		return -ENOMEM;
 
-	platform_set_drvdata(pdev, touch);
-
 	touch->idev = devm_input_allocate_device(&pdev->dev);
 	if (!touch->idev) {
 		dev_err(&pdev->dev, "Failed to allocate input device!\n");
@@ -251,7 +246,6 @@ static int pm860x_touch_probe(struct platform_device *pdev)
 	touch->idev->name = "88pm860x-touch";
 	touch->idev->phys = "88pm860x/input0";
 	touch->idev->id.bustype = BUS_I2C;
-	touch->idev->dev.parent = &pdev->dev;
 	touch->idev->open = pm860x_touch_open;
 	touch->idev->close = pm860x_touch_close;
 	touch->chip = chip;
@@ -285,7 +279,6 @@ static int pm860x_touch_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	platform_set_drvdata(pdev, touch);
 	return 0;
 }
 

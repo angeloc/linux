@@ -1,75 +1,75 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _ASM_POWERPC_ASM_PROTOTYPES_H
 #define _ASM_POWERPC_ASM_PROTOTYPES_H
 /*
- * This file is for prototypes of C functions that are only called
- * from asm, and any associated variables.
+ * This file is for C prototypes of asm symbols that are EXPORTed.
+ * It allows the modversions logic to see their prototype and
+ * generate proper CRCs for them.
  *
  * Copyright 2016, Daniel Axtens, IBM Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
  */
 
 #include <linux/threads.h>
-#include <linux/kprobes.h>
+#include <asm/cacheflush.h>
+#include <asm/checksum.h>
+#include <linux/uaccess.h>
+#include <asm/epapr_hcalls.h>
+#include <asm/dcr.h>
+#include <asm/mmu_context.h>
+#include <asm/ultravisor-api.h>
 
-/* SMP */
-extern struct thread_info *current_set[NR_CPUS];
-extern struct thread_info *secondary_ti;
-void start_secondary(void *unused);
+#include <uapi/asm/ucontext.h>
 
-/* kexec */
-struct paca_struct;
-struct kimage;
-extern struct paca_struct kexec_paca;
-void kexec_copy_flush(struct kimage *image);
-
-/* pseries hcall tracing */
-extern struct static_key hcall_tracepoint_key;
-void __trace_hcall_entry(unsigned long opcode, unsigned long *args);
-void __trace_hcall_exit(long opcode, unsigned long retval,
-			unsigned long *retbuf);
-/* OPAL tracing */
-#ifdef HAVE_JUMP_LABEL
-extern struct static_key opal_tracepoint_key;
+/* Ultravisor */
+#if defined(CONFIG_PPC_POWERNV) || defined(CONFIG_PPC_SVM)
+long ucall_norets(unsigned long opcode, ...);
+#else
+static inline long ucall_norets(unsigned long opcode, ...)
+{
+	return U_NOT_AVAILABLE;
+}
 #endif
 
-void __trace_opal_entry(unsigned long opcode, unsigned long *args);
-void __trace_opal_exit(long opcode, unsigned long retval);
+/* OPAL */
+int64_t __opal_call(int64_t a0, int64_t a1, int64_t a2, int64_t a3,
+		    int64_t a4, int64_t a5, int64_t a6, int64_t a7,
+		    int64_t opcode, uint64_t msr);
 
-/* VMX copying */
-int enter_vmx_usercopy(void);
-int exit_vmx_usercopy(void);
-int enter_vmx_copy(void);
-void * exit_vmx_copy(void *dest);
+/* misc runtime */
+void enable_machine_check(void);
+extern u64 __bswapdi2(u64);
+extern s64 __lshrdi3(s64, int);
+extern s64 __ashldi3(s64, int);
+extern s64 __ashrdi3(s64, int);
+extern int __cmpdi2(s64, s64);
+extern int __ucmpdi2(u64, u64);
 
-/* Traps */
-long machine_check_early(struct pt_regs *regs);
-long hmi_exception_realmode(struct pt_regs *regs);
-void SMIException(struct pt_regs *regs);
-void handle_hmi_exception(struct pt_regs *regs);
-void instruction_breakpoint_exception(struct pt_regs *regs);
-void RunModeException(struct pt_regs *regs);
-void __kprobes single_step_exception(struct pt_regs *regs);
-void __kprobes program_check_exception(struct pt_regs *regs);
-void alignment_exception(struct pt_regs *regs);
-void StackOverflow(struct pt_regs *regs);
-void nonrecoverable_exception(struct pt_regs *regs);
-void kernel_fp_unavailable_exception(struct pt_regs *regs);
-void altivec_unavailable_exception(struct pt_regs *regs);
-void vsx_unavailable_exception(struct pt_regs *regs);
-void fp_unavailable_tm(struct pt_regs *regs);
-void altivec_unavailable_tm(struct pt_regs *regs);
-void vsx_unavailable_tm(struct pt_regs *regs);
-void facility_unavailable_exception(struct pt_regs *regs);
-void TAUException(struct pt_regs *regs);
-void altivec_assist_exception(struct pt_regs *regs);
-void unrecoverable_exception(struct pt_regs *regs);
-void kernel_bad_stack(struct pt_regs *regs);
-void system_reset_exception(struct pt_regs *regs);
-void machine_check_exception(struct pt_regs *regs);
-void __kprobes emulation_assist_interrupt(struct pt_regs *regs);
+/* tracing */
+void _mcount(void);
+
+/* Transaction memory related */
+void tm_enable(void);
+void tm_disable(void);
+void tm_abort(uint8_t cause);
+
+struct kvm_vcpu;
+void _kvmppc_restore_tm_pr(struct kvm_vcpu *vcpu, u64 guest_msr);
+void _kvmppc_save_tm_pr(struct kvm_vcpu *vcpu, u64 guest_msr);
+
+#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
+void kvmppc_save_tm_hv(struct kvm_vcpu *vcpu, u64 msr, bool preserve_nv);
+void kvmppc_restore_tm_hv(struct kvm_vcpu *vcpu, u64 msr, bool preserve_nv);
+#else
+static inline void kvmppc_save_tm_hv(struct kvm_vcpu *vcpu, u64 msr,
+				     bool preserve_nv) { }
+static inline void kvmppc_restore_tm_hv(struct kvm_vcpu *vcpu, u64 msr,
+					bool preserve_nv) { }
+#endif /* CONFIG_PPC_TRANSACTIONAL_MEM */
+
+void kvmppc_p9_enter_guest(struct kvm_vcpu *vcpu);
+
+long kvmppc_h_set_dabr(struct kvm_vcpu *vcpu, unsigned long dabr);
+long kvmppc_h_set_xdabr(struct kvm_vcpu *vcpu, unsigned long dabr,
+			unsigned long dabrx);
 
 #endif /* _ASM_POWERPC_ASM_PROTOTYPES_H */

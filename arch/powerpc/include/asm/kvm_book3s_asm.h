@@ -1,16 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  *
  * Copyright SUSE Linux Products GmbH 2009
  *
@@ -31,7 +20,7 @@
 /* Maximum number of subcores per physical core */
 #define MAX_SUBCORES		4
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 
 #ifdef CONFIG_KVM_BOOK3S_HANDLER
 
@@ -69,7 +58,7 @@ kvmppc_resume_\intno:
 
 #endif /* CONFIG_KVM_BOOK3S_HANDLER */
 
-#else  /*__ASSEMBLY__ */
+#else  /*__ASSEMBLER__ */
 
 struct kvmppc_vcore;
 
@@ -81,7 +70,7 @@ struct kvm_split_mode {
 	u8		subcore_size;
 	u8		do_nap;
 	u8		napped[MAX_SMT_THREADS];
-	struct kvmppc_vcore *master_vcs[MAX_SUBCORES];
+	struct kvmppc_vcore *vc[MAX_SUBCORES];
 };
 
 /*
@@ -107,10 +96,13 @@ struct kvmppc_host_state {
 	u8 hwthread_req;
 	u8 hwthread_state;
 	u8 host_ipi;
-	u8 ptid;
+	u8 ptid;		/* thread number within subcore when split */
+	u8 fake_suspend;
 	struct kvm_vcpu *kvm_vcpu;
 	struct kvmppc_vcore *kvm_vcore;
-	unsigned long xics_phys;
+	void __iomem *xics_phys;
+	void __iomem *xive_tima_phys;
+	void __iomem *xive_tima_virt;
 	u32 saved_xirr;
 	u64 dabr;
 	u64 host_mmcr[7];	/* MMCR 0,1,A, SIAR, SDAR, MMCR2, SIER */
@@ -158,7 +150,7 @@ struct kvmppc_book3s_shadow_vcpu {
 #endif
 };
 
-#endif /*__ASSEMBLY__ */
+#endif /*__ASSEMBLER__ */
 
 /* Values for kvm_state */
 #define KVM_HWTHREAD_IN_KERNEL	0

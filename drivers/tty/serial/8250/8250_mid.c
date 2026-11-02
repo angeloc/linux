@@ -1,21 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * 8250_mid.c - Driver for UART on Intel Penwell and various other Intel SOCs
  *
  * Copyright (C) 2015 Intel Corporation
  * Author: Heikki Krogerus <heikki.krogerus@linux.intel.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/bitops.h>
+#include <linux/cleanup.h>
+#include <linux/err.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/rational.h>
+#include <linux/util_macros.h>
 
 #include <linux/dma/hsu.h>
-#include <linux/8250_pci.h>
 
 #include "8250.h"
 
@@ -23,10 +22,11 @@
 #define PCI_DEVICE_ID_INTEL_PNW_UART2	0x081c
 #define PCI_DEVICE_ID_INTEL_PNW_UART3	0x081d
 #define PCI_DEVICE_ID_INTEL_TNG_UART	0x1191
+#define PCI_DEVICE_ID_INTEL_CDF_UART	0x18d8
 #define PCI_DEVICE_ID_INTEL_DNV_UART	0x19d8
 
 /* Intel MID Specific registers */
-#define INTEL_MID_UART_DNV_FISR		0x08
+#define INTEL_MID_UART_FISR		0x08
 #define INTEL_MID_UART_PS		0x30
 #define INTEL_MID_UART_MUL		0x34
 #define INTEL_MID_UART_DIV		0x38
@@ -34,15 +34,15 @@
 struct mid8250;
 
 struct mid8250_board {
-	unsigned int flags;
 	unsigned long freq;
 	unsigned int base_baud;
+	unsigned int bar;
 	int (*setup)(struct mid8250 *, struct uart_port *p);
 	void (*exit)(struct mid8250 *);
 };
 
 struct mid8250 {
-	int line;
+	struct uart_8250_port *uport;
 	int dma_index;
 	struct pci_dev *dma_dev;
 	struct uart_8250_dma dma;
@@ -75,6 +75,42 @@ static int pnw_setup(struct mid8250 *mid, struct uart_port *p)
 	return 0;
 }
 
+static void pnw_exit(struct mid8250 *mid)
+{
+	pci_dev_put(mid->dma_dev);
+}
+
+static int tng_handle_irq(struct uart_port *p)
+{
+	struct mid8250 *mid = p->private_data;
+	struct uart_8250_port *up = up_to_u8250p(p);
+	struct hsu_dma_chip *chip;
+	u32 status;
+	int ret = 0;
+	int err;
+
+	chip = pci_get_drvdata(mid->dma_dev);
+
+	/* Rx DMA */
+	err = hsu_dma_get_status(chip, mid->dma_index * 2 + 1, &status);
+	if (err > 0) {
+		serial8250_rx_dma_flush(up);
+		ret |= 1;
+	} else if (err == 0)
+		ret |= hsu_dma_do_irq(chip, mid->dma_index * 2 + 1, status);
+
+	/* Tx DMA */
+	err = hsu_dma_get_status(chip, mid->dma_index * 2, &status);
+	if (err > 0)
+		ret |= 1;
+	else if (err == 0)
+		ret |= hsu_dma_do_irq(chip, mid->dma_index * 2, status);
+
+	/* UART */
+	ret |= serial8250_handle_irq(p, serial_port_in(p, UART_IIR));
+	return IRQ_RETVAL(ret);
+}
+
 static int tng_setup(struct mid8250 *mid, struct uart_port *p)
 {
 	struct pci_dev *pdev = to_pci_dev(p->dev);
@@ -90,36 +126,43 @@ static int tng_setup(struct mid8250 *mid, struct uart_port *p)
 
 	mid->dma_index = index;
 	mid->dma_dev = pci_get_slot(pdev->bus, PCI_DEVFN(5, 0));
+
+	p->handle_irq = tng_handle_irq;
 	return 0;
+}
+
+static void tng_exit(struct mid8250 *mid)
+{
+	pci_dev_put(mid->dma_dev);
 }
 
 static int dnv_handle_irq(struct uart_port *p)
 {
 	struct mid8250 *mid = p->private_data;
 	struct uart_8250_port *up = up_to_u8250p(p);
-	unsigned int fisr = serial_port_in(p, INTEL_MID_UART_DNV_FISR);
+	unsigned int fisr = serial_port_in(p, INTEL_MID_UART_FISR);
 	u32 status;
-	int ret = IRQ_NONE;
+	int ret = 0;
 	int err;
 
 	if (fisr & BIT(2)) {
 		err = hsu_dma_get_status(&mid->dma_chip, 1, &status);
 		if (err > 0) {
 			serial8250_rx_dma_flush(up);
-			ret |= IRQ_HANDLED;
+			ret |= 1;
 		} else if (err == 0)
 			ret |= hsu_dma_do_irq(&mid->dma_chip, 1, status);
 	}
 	if (fisr & BIT(1)) {
 		err = hsu_dma_get_status(&mid->dma_chip, 0, &status);
 		if (err > 0)
-			ret |= IRQ_HANDLED;
+			ret |= 1;
 		else if (err == 0)
 			ret |= hsu_dma_do_irq(&mid->dma_chip, 0, status);
 	}
 	if (fisr & BIT(0))
 		ret |= serial8250_handle_irq(p, serial_port_in(p, UART_IIR));
-	return ret;
+	return IRQ_RETVAL(ret);
 }
 
 #define DNV_DMA_CHAN_OFFSET 0x80
@@ -128,13 +171,20 @@ static int dnv_setup(struct mid8250 *mid, struct uart_port *p)
 {
 	struct hsu_dma_chip *chip = &mid->dma_chip;
 	struct pci_dev *pdev = to_pci_dev(p->dev);
-	unsigned int bar = FL_GET_BASE(mid->board->flags);
 	int ret;
 
+	pci_set_master(pdev);
+
+	ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
+	if (ret < 0)
+		return ret;
+
+	p->irq = pci_irq_vector(pdev, 0);
+
 	chip->dev = &pdev->dev;
-	chip->irq = pdev->irq;
+	chip->irq = pci_irq_vector(pdev, 0);
 	chip->regs = p->membase;
-	chip->length = pci_resource_len(pdev, bar);
+	chip->length = pci_resource_len(pdev, mid->board->bar);
 	chip->offset = DNV_DMA_CHAN_OFFSET;
 
 	/* Falling back to PIO mode if DMA probing fails */
@@ -157,16 +207,19 @@ static void dnv_exit(struct mid8250 *mid)
 
 /*****************************************************************************/
 
-static void mid8250_set_termios(struct uart_port *p,
-				struct ktermios *termios,
-				struct ktermios *old)
+static void mid8250_set_termios(struct uart_port *p, struct ktermios *termios,
+				const struct ktermios *old)
 {
 	unsigned int baud = tty_termios_baud_rate(termios);
+	struct uart_8250_port *up = up_to_u8250p(p);
 	struct mid8250 *mid = p->private_data;
 	unsigned short ps = 16;
 	unsigned long fuart = baud * ps;
 	unsigned long w = BIT(24) - 1;
 	unsigned long mul, div;
+
+	/* Gracefully handle the B0 case: fall back to B9600 */
+	fuart = fuart ? fuart : 9600 * 16;
 
 	if (mid->board->freq < fuart) {
 		/* Find prescaler value that satisfies Fuart < Fref */
@@ -181,11 +234,16 @@ static void mid8250_set_termios(struct uart_port *p,
 	}
 
 	rational_best_approximation(fuart, mid->board->freq, w, w, &mul, &div);
-	p->uartclk = fuart * 16 / ps;		/* core uses ps = 16 always */
 
-	writel(ps, p->membase + INTEL_MID_UART_PS);		/* set PS */
-	writel(mul, p->membase + INTEL_MID_UART_MUL);		/* set MUL */
-	writel(div, p->membase + INTEL_MID_UART_DIV);
+	scoped_guard(spinlock_irq, &p->lock) {
+		p->uartclk = fuart * 16 / ps;	/* core uses ps = 16 always */
+
+		serial8250_wait_for_xmitr(up, UART_LSR_BOTH_EMPTY);
+
+		writel(ps, p->membase + INTEL_MID_UART_PS);	/* set PS */
+		writel(mul, p->membase + INTEL_MID_UART_MUL);	/* set MUL */
+		writel(div, p->membase + INTEL_MID_UART_DIV);
+	}
 
 	serial8250_do_set_termios(p, termios, old);
 }
@@ -240,21 +298,17 @@ static int mid8250_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct uart_8250_port uart;
 	struct mid8250 *mid;
-	unsigned int bar;
 	int ret;
 
 	ret = pcim_enable_device(pdev);
 	if (ret)
 		return ret;
 
-	pci_set_master(pdev);
-
 	mid = devm_kzalloc(&pdev->dev, sizeof(*mid), GFP_KERNEL);
 	if (!mid)
 		return -ENOMEM;
 
 	mid->board = (struct mid8250_board *)id->driver_data;
-	bar = FL_GET_BASE(mid->board->flags);
 
 	memset(&uart, 0, sizeof(struct uart_8250_port));
 
@@ -267,8 +321,8 @@ static int mid8250_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	uart.port.flags = UPF_SHARE_IRQ | UPF_FIXED_PORT | UPF_FIXED_TYPE;
 	uart.port.set_termios = mid8250_set_termios;
 
-	uart.port.mapbase = pci_resource_start(pdev, bar);
-	uart.port.membase = pcim_iomap(pdev, bar, 0);
+	uart.port.mapbase = pci_resource_start(pdev, mid->board->bar);
+	uart.port.membase = pcim_iomap(pdev, mid->board->bar, 0);
 	if (!uart.port.membase)
 		return -ENOMEM;
 
@@ -282,14 +336,15 @@ static int mid8250_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (ret)
 		goto err;
 
-	ret = serial8250_register_8250_port(&uart);
-	if (ret < 0)
+	mid->uport = serial8250_register_8250_port(&uart);
+	if (IS_ERR(mid->uport)) {
+		ret = PTR_ERR(mid->uport);
 		goto err;
-
-	mid->line = ret;
+	}
 
 	pci_set_drvdata(pdev, mid);
 	return 0;
+
 err:
 	if (mid->board->exit)
 		mid->board->exit(mid);
@@ -300,43 +355,52 @@ static void mid8250_remove(struct pci_dev *pdev)
 {
 	struct mid8250 *mid = pci_get_drvdata(pdev);
 
+	serial8250_unregister_port(mid->uport);
+
 	if (mid->board->exit)
 		mid->board->exit(mid);
-
-	serial8250_unregister_port(mid->line);
 }
 
 static const struct mid8250_board pnw_board = {
-	.flags = FL_BASE0,
 	.freq = 50000000,
 	.base_baud = 115200,
+	.bar = 0,
 	.setup = pnw_setup,
+	.exit = pnw_exit,
 };
 
 static const struct mid8250_board tng_board = {
-	.flags = FL_BASE0,
 	.freq = 38400000,
 	.base_baud = 1843200,
+	.bar = 0,
 	.setup = tng_setup,
+	.exit = tng_exit,
 };
 
 static const struct mid8250_board dnv_board = {
-	.flags = FL_BASE1,
 	.freq = 133333333,
 	.base_baud = 115200,
-	.setup = dnv_setup,
-	.exit = dnv_exit,
+	.bar = 1,
+	/*
+	 * Errata:
+	 * HSUART May Stop Functioning when DMA is Active.
+	 *
+	 * - Denverton document #572409, rev 3.4, DNV60
+	 * - Ice Lake Xeon D document #714070, ICXD65
+	 * - Snowridge document #731931, SNR44
+	 */
+	.setup = PTR_IF(false, dnv_setup),
+	.exit = PTR_IF(false, dnv_exit),
 };
 
-#define MID_DEVICE(id, board) { PCI_VDEVICE(INTEL, id), (kernel_ulong_t)&board }
-
 static const struct pci_device_id pci_ids[] = {
-	MID_DEVICE(PCI_DEVICE_ID_INTEL_PNW_UART1, pnw_board),
-	MID_DEVICE(PCI_DEVICE_ID_INTEL_PNW_UART2, pnw_board),
-	MID_DEVICE(PCI_DEVICE_ID_INTEL_PNW_UART3, pnw_board),
-	MID_DEVICE(PCI_DEVICE_ID_INTEL_TNG_UART, tng_board),
-	MID_DEVICE(PCI_DEVICE_ID_INTEL_DNV_UART, dnv_board),
-	{ },
+	{ PCI_DEVICE_DATA(INTEL, PNW_UART1, &pnw_board) },
+	{ PCI_DEVICE_DATA(INTEL, PNW_UART2, &pnw_board) },
+	{ PCI_DEVICE_DATA(INTEL, PNW_UART3, &pnw_board) },
+	{ PCI_DEVICE_DATA(INTEL, TNG_UART, &tng_board) },
+	{ PCI_DEVICE_DATA(INTEL, CDF_UART, &dnv_board) },
+	{ PCI_DEVICE_DATA(INTEL, DNV_UART, &dnv_board) },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, pci_ids);
 
@@ -352,3 +416,4 @@ module_pci_driver(mid8250_pci_driver);
 MODULE_AUTHOR("Intel Corporation");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Intel MID UART driver");
+MODULE_IMPORT_NS("SERIAL_8250");

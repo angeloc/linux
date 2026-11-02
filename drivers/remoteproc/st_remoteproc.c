@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ST's Remote Processor Control Driver
  *
  * Copyright (C) 2015 STMicroelectronics - All Rights Reserved
  *
  * Author: Ludovic Barre <ludovic.barre@st.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -15,15 +12,26 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/mailbox_client.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/remoteproc.h>
 #include <linux/reset.h>
+
+#include "remoteproc_internal.h"
+
+#define ST_RPROC_VQ0		0
+#define ST_RPROC_VQ1		1
+#define ST_RPROC_MAX_VRING	2
+
+#define MBOX_RX			0
+#define MBOX_TX			1
+#define MBOX_MAX		2
 
 struct st_rproc_config {
 	bool			sw_reset;
@@ -39,7 +47,91 @@ struct st_rproc {
 	u32			clk_rate;
 	struct regmap		*boot_base;
 	u32			boot_offset;
+	struct mbox_chan	*mbox_chan[ST_RPROC_MAX_VRING * MBOX_MAX];
+	struct mbox_client mbox_client_vq0;
+	struct mbox_client mbox_client_vq1;
 };
+
+static void st_rproc_mbox_callback(struct device *dev, u32 msg)
+{
+	struct rproc *rproc = dev_get_drvdata(dev);
+
+	if (rproc_vq_interrupt(rproc, msg) == IRQ_NONE)
+		dev_dbg(dev, "no message was found in vqid %d\n", msg);
+}
+
+static
+void st_rproc_mbox_callback_vq0(struct mbox_client *mbox_client, void *data)
+{
+	st_rproc_mbox_callback(mbox_client->dev, 0);
+}
+
+static
+void st_rproc_mbox_callback_vq1(struct mbox_client *mbox_client, void *data)
+{
+	st_rproc_mbox_callback(mbox_client->dev, 1);
+}
+
+static void st_rproc_kick(struct rproc *rproc, int vqid)
+{
+	struct st_rproc *ddata = rproc->priv;
+	struct device *dev = rproc->dev.parent;
+	int ret;
+
+	/* send the index of the triggered virtqueue in the mailbox payload */
+	if (WARN_ON(vqid >= ST_RPROC_MAX_VRING))
+		return;
+
+	ret = mbox_send_message(ddata->mbox_chan[vqid * MBOX_MAX + MBOX_TX],
+				(void *)&vqid);
+	if (ret < 0)
+		dev_err(dev, "failed to send message via mbox: %d\n", ret);
+}
+
+static int st_rproc_parse_fw(struct rproc *rproc, const struct firmware *fw)
+{
+	struct device *dev = rproc->dev.parent;
+	struct device_node *np = dev->of_node;
+	struct rproc_mem_entry *mem;
+	int entries;
+
+	entries = of_reserved_mem_region_count(np);
+
+	for (int index = 0; index < entries; index++) {
+		struct resource res;
+		int ret;
+
+		ret = of_reserved_mem_region_to_resource(np, index, &res);
+		if (ret)
+			return ret;
+
+		/*  No need to map vdev buffer */
+		if (!strstarts(res.name, "vdev0buffer")) {
+			/* Register memory region */
+			mem = rproc_mem_entry_init(dev, NULL,
+						   (dma_addr_t)res.start,
+						   resource_size(&res), res.start,
+						   rproc_mem_entry_ioremap_wc,
+						   rproc_mem_entry_iounmap,
+						   "%.*s",
+						   strchrnul(res.name, '@') - res.name,
+						   res.name);
+		} else {
+			/* Register reserved memory for vdev buffer allocation */
+			mem = rproc_of_resm_mem_entry_init(dev, index,
+							   resource_size(&res),
+							   res.start,
+							   "vdev0buffer");
+		}
+
+		if (!mem)
+			return -ENOMEM;
+
+		rproc_add_carveout(rproc, mem);
+	}
+
+	return rproc_elf_load_rsc_table(rproc, fw);
+}
 
 static int st_rproc_start(struct rproc *rproc)
 {
@@ -71,7 +163,7 @@ static int st_rproc_start(struct rproc *rproc)
 		}
 	}
 
-	dev_info(&rproc->dev, "Started from 0x%x\n", rproc->bootaddr);
+	dev_info(&rproc->dev, "Started from 0x%llx\n", rproc->bootaddr);
 
 	return 0;
 
@@ -107,9 +199,15 @@ static int st_rproc_stop(struct rproc *rproc)
 	return sw_err ?: pwr_err;
 }
 
-static struct rproc_ops st_rproc_ops = {
-	.start		= st_rproc_start,
-	.stop		= st_rproc_stop,
+static const struct rproc_ops st_rproc_ops = {
+	.kick			= st_rproc_kick,
+	.start			= st_rproc_start,
+	.stop			= st_rproc_stop,
+	.parse_fw		= st_rproc_parse_fw,
+	.load			= rproc_elf_load_segments,
+	.find_loaded_rsc_table	= rproc_elf_find_loaded_rsc_table,
+	.sanity_check		= rproc_elf_sanity_check,
+	.get_boot_addr		= rproc_elf_get_boot_addr,
 };
 
 /*
@@ -161,26 +259,25 @@ static int st_rproc_parse_dt(struct platform_device *pdev)
 	int err;
 
 	if (ddata->config->sw_reset) {
-		ddata->sw_reset = devm_reset_control_get(dev, "sw_reset");
-		if (IS_ERR(ddata->sw_reset)) {
-			dev_err(dev, "Failed to get S/W Reset\n");
-			return PTR_ERR(ddata->sw_reset);
-		}
+		ddata->sw_reset = devm_reset_control_get_exclusive(dev,
+								   "sw_reset");
+		if (IS_ERR(ddata->sw_reset))
+			return dev_err_probe(dev, PTR_ERR(ddata->sw_reset),
+					     "Failed to get S/W Reset\n");
 	}
 
 	if (ddata->config->pwr_reset) {
-		ddata->pwr_reset = devm_reset_control_get(dev, "pwr_reset");
-		if (IS_ERR(ddata->pwr_reset)) {
-			dev_err(dev, "Failed to get Power Reset\n");
-			return PTR_ERR(ddata->pwr_reset);
-		}
+		ddata->pwr_reset = devm_reset_control_get_exclusive(dev,
+								    "pwr_reset");
+		if (IS_ERR(ddata->pwr_reset))
+			return dev_err_probe(dev, PTR_ERR(ddata->pwr_reset),
+					     "Failed to get Power Reset\n");
 	}
 
 	ddata->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(ddata->clk)) {
-		dev_err(dev, "Failed to get clock\n");
-		return PTR_ERR(ddata->clk);
-	}
+	if (IS_ERR(ddata->clk))
+		return dev_err_probe(dev, PTR_ERR(ddata->clk),
+				     "Failed to get clock\n");
 
 	err = of_property_read_u32(np, "clock-frequency", &ddata->clk_rate);
 	if (err) {
@@ -188,24 +285,11 @@ static int st_rproc_parse_dt(struct platform_device *pdev)
 		return err;
 	}
 
-	ddata->boot_base = syscon_regmap_lookup_by_phandle(np, "st,syscfg");
-	if (IS_ERR(ddata->boot_base)) {
-		dev_err(dev, "Boot base not found\n");
-		return PTR_ERR(ddata->boot_base);
-	}
-
-	err = of_property_read_u32_index(np, "st,syscfg", 1,
-					 &ddata->boot_offset);
-	if (err) {
-		dev_err(dev, "Boot offset not found\n");
-		return -EINVAL;
-	}
-
-	err = of_reserved_mem_device_init(dev);
-	if (err) {
-		dev_err(dev, "Failed to obtain shared memory\n");
-		return err;
-	}
+	ddata->boot_base = syscon_regmap_lookup_by_phandle_args(np, "st,syscfg",
+								1, &ddata->boot_offset);
+	if (IS_ERR(ddata->boot_base))
+		return dev_err_probe(dev, PTR_ERR(ddata->boot_base),
+				     "Boot base not found\n");
 
 	err = clk_prepare(ddata->clk);
 	if (err)
@@ -217,36 +301,34 @@ static int st_rproc_parse_dt(struct platform_device *pdev)
 static int st_rproc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	const struct of_device_id *match;
 	struct st_rproc *ddata;
 	struct device_node *np = dev->of_node;
 	struct rproc *rproc;
+	struct mbox_chan *chan;
 	int enabled;
-	int ret;
+	int ret, i;
 
-	match = of_match_device(st_rproc_match, dev);
-	if (!match || !match->data) {
-		dev_err(dev, "No device match found\n");
-		return -ENODEV;
-	}
-
-	rproc = rproc_alloc(dev, np->name, &st_rproc_ops, NULL, sizeof(*ddata));
+	rproc = devm_rproc_alloc(dev, np->name, &st_rproc_ops, NULL, sizeof(*ddata));
 	if (!rproc)
 		return -ENOMEM;
 
 	rproc->has_iommu = false;
 	ddata = rproc->priv;
-	ddata->config = (struct st_rproc_config *)match->data;
+	ddata->config = (struct st_rproc_config *)device_get_match_data(dev);
+	if (!ddata->config)
+		return -ENODEV;
 
 	platform_set_drvdata(pdev, rproc);
 
 	ret = st_rproc_parse_dt(pdev);
 	if (ret)
-		goto free_rproc;
+		return ret;
 
 	enabled = st_rproc_state(pdev);
-	if (enabled < 0)
-		goto free_rproc;
+	if (enabled < 0) {
+		ret = enabled;
+		goto free_clk;
+	}
 
 	if (enabled) {
 		atomic_inc(&rproc->power);
@@ -255,31 +337,83 @@ static int st_rproc_probe(struct platform_device *pdev)
 		clk_set_rate(ddata->clk, ddata->clk_rate);
 	}
 
+	if (of_property_present(np, "mbox-names")) {
+		ddata->mbox_client_vq0.dev		= dev;
+		ddata->mbox_client_vq0.tx_done		= NULL;
+		ddata->mbox_client_vq0.tx_block	= false;
+		ddata->mbox_client_vq0.knows_txdone	= false;
+		ddata->mbox_client_vq0.rx_callback	= st_rproc_mbox_callback_vq0;
+
+		ddata->mbox_client_vq1.dev		= dev;
+		ddata->mbox_client_vq1.tx_done		= NULL;
+		ddata->mbox_client_vq1.tx_block	= false;
+		ddata->mbox_client_vq1.knows_txdone	= false;
+		ddata->mbox_client_vq1.rx_callback	= st_rproc_mbox_callback_vq1;
+
+		/*
+		 * To control a co-processor without IPC mechanism.
+		 * This driver can be used without mbox and rpmsg.
+		 */
+		chan = mbox_request_channel_byname(&ddata->mbox_client_vq0, "vq0_rx");
+		if (IS_ERR(chan)) {
+			ret = dev_err_probe(&rproc->dev, PTR_ERR(chan),
+					    "failed to request mbox chan 0\n");
+			goto free_clk;
+		}
+		ddata->mbox_chan[ST_RPROC_VQ0 * MBOX_MAX + MBOX_RX] = chan;
+
+		chan = mbox_request_channel_byname(&ddata->mbox_client_vq0, "vq0_tx");
+		if (IS_ERR(chan)) {
+			ret = dev_err_probe(&rproc->dev, PTR_ERR(chan),
+					    "failed to request mbox chan 0\n");
+			goto free_mbox;
+		}
+		ddata->mbox_chan[ST_RPROC_VQ0 * MBOX_MAX + MBOX_TX] = chan;
+
+		chan = mbox_request_channel_byname(&ddata->mbox_client_vq1, "vq1_rx");
+		if (IS_ERR(chan)) {
+			ret = dev_err_probe(&rproc->dev, PTR_ERR(chan),
+					    "failed to request mbox chan 1\n");
+			goto free_mbox;
+		}
+		ddata->mbox_chan[ST_RPROC_VQ1 * MBOX_MAX + MBOX_RX] = chan;
+
+		chan = mbox_request_channel_byname(&ddata->mbox_client_vq1, "vq1_tx");
+		if (IS_ERR(chan)) {
+			ret = dev_err_probe(&rproc->dev, PTR_ERR(chan),
+					    "failed to request mbox chan 1\n");
+			goto free_mbox;
+		}
+		ddata->mbox_chan[ST_RPROC_VQ1 * MBOX_MAX + MBOX_TX] = chan;
+	}
+
 	ret = rproc_add(rproc);
 	if (ret)
-		goto free_rproc;
+		goto free_mbox;
 
 	return 0;
 
-free_rproc:
-	rproc_put(rproc);
+free_mbox:
+	for (i = 0; i < ST_RPROC_MAX_VRING * MBOX_MAX; i++)
+		mbox_free_channel(ddata->mbox_chan[i]);
+free_clk:
+	clk_unprepare(ddata->clk);
+
 	return ret;
 }
 
-static int st_rproc_remove(struct platform_device *pdev)
+static void st_rproc_remove(struct platform_device *pdev)
 {
 	struct rproc *rproc = platform_get_drvdata(pdev);
 	struct st_rproc *ddata = rproc->priv;
+	int i;
 
 	rproc_del(rproc);
 
 	clk_disable_unprepare(ddata->clk);
 
-	of_reserved_mem_device_release(&pdev->dev);
-
-	rproc_put(rproc);
-
-	return 0;
+	for (i = 0; i < ST_RPROC_MAX_VRING * MBOX_MAX; i++)
+		mbox_free_channel(ddata->mbox_chan[i]);
 }
 
 static struct platform_driver st_rproc_driver = {

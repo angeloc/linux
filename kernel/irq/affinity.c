@@ -1,61 +1,124 @@
-
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (C) 2016 Thomas Gleixner.
+ * Copyright (C) 2016-2017 Christoph Hellwig.
+ */
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/cpu.h>
+#include <linux/group_cpus.h>
 
-static int get_first_sibling(unsigned int cpu)
+static void default_calc_sets(struct irq_affinity *affd, unsigned int affvecs)
 {
-	unsigned int ret;
-
-	ret = cpumask_first(topology_sibling_cpumask(cpu));
-	if (ret < nr_cpu_ids)
-		return ret;
-	return cpu;
+	affd->nr_sets = 1;
+	affd->set_size[0] = affvecs;
 }
 
-/*
- * Take a map of online CPUs and the number of available interrupt vectors
- * and generate an output cpumask suitable for spreading MSI/MSI-X vectors
- * so that they are distributed as good as possible around the CPUs.  If
- * more vectors than CPUs are available we'll map one to each CPU,
- * otherwise we map one to the first sibling of each socket.
+/**
+ * irq_create_affinity_masks - Create affinity masks for multiqueue spreading
+ * @nvecs:	The total number of vectors
+ * @affd:	Description of the affinity requirements
  *
- * If there are more vectors than CPUs we will still only have one bit
- * set per CPU, but interrupt code will keep on assigning the vectors from
- * the start of the bitmap until we run out of vectors.
+ * Returns the irq_affinity_desc pointer or NULL if allocation failed.
  */
-struct cpumask *irq_create_affinity_mask(unsigned int *nr_vecs)
+struct irq_affinity_desc *
+irq_create_affinity_masks(unsigned int nvecs, struct irq_affinity *affd)
 {
-	struct cpumask *affinity_mask;
-	unsigned int max_vecs = *nr_vecs;
+	unsigned int affvecs, curvec, usedvecs, i;
+	struct irq_affinity_desc *masks = NULL;
 
-	if (max_vecs == 1)
+	/*
+	 * Determine the number of vectors which need interrupt affinities
+	 * assigned. If the pre/post request exhausts the available vectors
+	 * then nothing to do here except for invoking the calc_sets()
+	 * callback so the device driver can adjust to the situation.
+	 */
+	if (nvecs > affd->pre_vectors + affd->post_vectors)
+		affvecs = nvecs - affd->pre_vectors - affd->post_vectors;
+	else
+		affvecs = 0;
+
+	/*
+	 * Simple invocations do not provide a calc_sets() callback. Install
+	 * the generic one.
+	 */
+	if (!affd->calc_sets)
+		affd->calc_sets = default_calc_sets;
+
+	/* Recalculate the sets */
+	affd->calc_sets(affd, affvecs);
+
+	if (WARN_ON_ONCE(affd->nr_sets > IRQ_AFFINITY_MAX_SETS))
 		return NULL;
 
-	affinity_mask = kzalloc(cpumask_size(), GFP_KERNEL);
-	if (!affinity_mask) {
-		*nr_vecs = 1;
+	/* Nothing to assign? */
+	if (!affvecs)
 		return NULL;
-	}
 
-	if (max_vecs >= num_online_cpus()) {
-		cpumask_copy(affinity_mask, cpu_online_mask);
-		*nr_vecs = num_online_cpus();
-	} else {
-		unsigned int vecs = 0, cpu;
+	masks = kzalloc_objs(*masks, nvecs);
+	if (!masks)
+		return NULL;
 
-		for_each_online_cpu(cpu) {
-			if (cpu == get_first_sibling(cpu)) {
-				cpumask_set_cpu(cpu, affinity_mask);
-				vecs++;
-			}
+	/* Fill out vectors at the beginning that don't need affinity */
+	for (curvec = 0; curvec < affd->pre_vectors; curvec++)
+		cpumask_copy(&masks[curvec].mask, irq_default_affinity);
 
-			if (--max_vecs == 0)
-				break;
+	/*
+	 * Spread on present CPUs starting from affd->pre_vectors. If we
+	 * have multiple sets, build each sets affinity mask separately.
+	 */
+	for (i = 0, usedvecs = 0; i < affd->nr_sets; i++) {
+		unsigned int nr_masks, this_vecs = affd->set_size[i];
+		struct cpumask *result = group_cpus_evenly(this_vecs, &nr_masks);
+
+		if (!result) {
+			kfree(masks);
+			return NULL;
 		}
-		*nr_vecs = vecs;
+
+		for (int j = 0; j < nr_masks; j++)
+			cpumask_copy(&masks[curvec + j].mask, &result[j]);
+		kfree(result);
+
+		curvec += nr_masks;
+		usedvecs += nr_masks;
 	}
 
-	return affinity_mask;
+	/* Fill out vectors at the end that don't need affinity */
+	if (usedvecs >= affvecs)
+		curvec = affd->pre_vectors + affvecs;
+	else
+		curvec = affd->pre_vectors + usedvecs;
+	for (; curvec < nvecs; curvec++)
+		cpumask_copy(&masks[curvec].mask, irq_default_affinity);
+
+	/* Mark the managed interrupts */
+	for (i = affd->pre_vectors; i < nvecs - affd->post_vectors; i++)
+		masks[i].is_managed = 1;
+
+	return masks;
+}
+
+/**
+ * irq_calc_affinity_vectors - Calculate the optimal number of vectors
+ * @minvec:	The minimum number of vectors available
+ * @maxvec:	The maximum number of vectors available
+ * @affd:	Description of the affinity requirements
+ */
+unsigned int irq_calc_affinity_vectors(unsigned int minvec, unsigned int maxvec,
+				       const struct irq_affinity *affd)
+{
+	unsigned int resv = affd->pre_vectors + affd->post_vectors;
+	unsigned int set_vecs;
+
+	if (resv > minvec)
+		return 0;
+
+	if (affd->calc_sets)
+		set_vecs = maxvec - resv;
+	else
+		set_vecs = cpumask_weight(cpu_possible_mask);
+
+	return resv + min(set_vecs, maxvec - resv);
 }

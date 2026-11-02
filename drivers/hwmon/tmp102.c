@@ -1,16 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Texas Instruments TMP102 SMBus temperature sensor driver
  *
  * Copyright (C) 2010 Steven King <sfking@fdwdc.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/delay.h>
@@ -19,14 +10,12 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/hwmon.h>
-#include <linux/hwmon-sysfs.h>
 #include <linux/err.h>
-#include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/jiffies.h>
 #include <linux/regmap.h>
-#include <linux/thermal.h>
-#include <linux/of.h>
+#include <linux/regulator/consumer.h>
+#include <linux/property.h>
 
 #define	DRIVER_NAME "tmp102"
 
@@ -61,10 +50,16 @@
 
 #define CONVERSION_TIME_MS		35	/* in milli-seconds */
 
+#define NUM_SAMPLE_TIMES		4
+#define DEFAULT_SAMPLE_TIME_MS		250
+static const unsigned int *sample_times = (const unsigned int []){ 125, 250, 1000, 4000 };
+
 struct tmp102 {
+	const char *label;
 	struct regmap *regmap;
 	u16 config_orig;
-	unsigned long ready_time;
+	u64 ready_time;
+	u16 sample_time;
 };
 
 /* convert left adjusted 13-bit TMP102 register value to milliCelsius */
@@ -79,84 +74,191 @@ static inline u16 tmp102_mC_to_reg(int val)
 	return (val * 128) / 1000;
 }
 
-static int tmp102_read_temp(void *dev, int *temp)
+static int tmp102_read_string(struct device *dev, enum hwmon_sensor_types type,
+			      u32 attr, int channel, const char **str)
 {
 	struct tmp102 *tmp102 = dev_get_drvdata(dev);
-	unsigned int reg;
-	int ret;
 
-	if (time_before(jiffies, tmp102->ready_time)) {
-		dev_dbg(dev, "%s: Conversion not ready yet..\n", __func__);
-		return -EAGAIN;
-	}
-
-	ret = regmap_read(tmp102->regmap, TMP102_TEMP_REG, &reg);
-	if (ret < 0)
-		return ret;
-
-	*temp = tmp102_reg_to_mC(reg);
+	*str = tmp102->label;
 
 	return 0;
 }
 
-static ssize_t tmp102_show_temp(struct device *dev,
-				struct device_attribute *attr,
-				char *buf)
+static int tmp102_read_chip(struct device *dev, u32 attr, long *val)
 {
-	struct sensor_device_attribute *sda = to_sensor_dev_attr(attr);
 	struct tmp102 *tmp102 = dev_get_drvdata(dev);
-	int regaddr = sda->index;
-	unsigned int reg;
-	int err;
 
-	if (regaddr == TMP102_TEMP_REG &&
-	    time_before(jiffies, tmp102->ready_time))
-		return -EAGAIN;
+	switch (attr) {
+	case hwmon_chip_update_interval:
+		*val = tmp102->sample_time;
+		return 0;
+	default:
+		return -EOPNOTSUPP;
+	}
+}
 
-	err = regmap_read(tmp102->regmap, regaddr, &reg);
+static int tmp102_read_temp(struct device *dev, u32 attr, long *val)
+{
+	struct tmp102 *tmp102 = dev_get_drvdata(dev);
+	unsigned int regval;
+	int err, reg;
+
+	switch (attr) {
+	case hwmon_temp_input:
+		/* Is it too early to return a conversion ? */
+		if (time_before64(get_jiffies_64(), tmp102->ready_time)) {
+			dev_dbg(dev, "%s: Conversion not ready yet..\n", __func__);
+			return -EAGAIN;
+		}
+		reg = TMP102_TEMP_REG;
+		break;
+	case hwmon_temp_max_hyst:
+		reg = TMP102_TLOW_REG;
+		break;
+	case hwmon_temp_max:
+		reg = TMP102_THIGH_REG;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	err = regmap_read(tmp102->regmap, reg, &regval);
 	if (err < 0)
 		return err;
 
-	return sprintf(buf, "%d\n", tmp102_reg_to_mC(reg));
+	*val = tmp102_reg_to_mC(regval);
+
+	return 0;
 }
 
-static ssize_t tmp102_set_temp(struct device *dev,
-			       struct device_attribute *attr,
-			       const char *buf, size_t count)
+static int tmp102_read(struct device *dev, enum hwmon_sensor_types type,
+		       u32 attr, int channel, long *val)
 {
-	struct sensor_device_attribute *sda = to_sensor_dev_attr(attr);
-	struct tmp102 *tmp102 = dev_get_drvdata(dev);
-	int reg = sda->index;
-	long val;
-	int err;
-
-	if (kstrtol(buf, 10, &val) < 0)
-		return -EINVAL;
-	val = clamp_val(val, -256000, 255000);
-
-	err = regmap_write(tmp102->regmap, reg, tmp102_mC_to_reg(val));
-	return err ? : count;
+	switch (type) {
+	case hwmon_chip:
+		return tmp102_read_chip(dev, attr, val);
+	case hwmon_temp:
+		return tmp102_read_temp(dev, attr, val);
+	default:
+		return -EOPNOTSUPP;
+	}
 }
 
-static SENSOR_DEVICE_ATTR(temp1_input, S_IRUGO, tmp102_show_temp, NULL,
-			  TMP102_TEMP_REG);
+static int tmp102_update_interval(struct device *dev, long val)
+{
+	struct tmp102 *tmp102 = dev_get_drvdata(dev);
+	u8 index;
+	s32 err;
 
-static SENSOR_DEVICE_ATTR(temp1_max_hyst, S_IWUSR | S_IRUGO, tmp102_show_temp,
-			  tmp102_set_temp, TMP102_TLOW_REG);
+	index = find_closest(val, sample_times, NUM_SAMPLE_TIMES);
 
-static SENSOR_DEVICE_ATTR(temp1_max, S_IWUSR | S_IRUGO, tmp102_show_temp,
-			  tmp102_set_temp, TMP102_THIGH_REG);
+	err = regmap_update_bits(tmp102->regmap, TMP102_CONF_REG,
+				 (TMP102_CONF_CR1 | TMP102_CONF_CR0), (3 - index) << 6);
+	if (err < 0)
+		return err;
+	tmp102->sample_time = sample_times[index];
 
-static struct attribute *tmp102_attrs[] = {
-	&sensor_dev_attr_temp1_input.dev_attr.attr,
-	&sensor_dev_attr_temp1_max_hyst.dev_attr.attr,
-	&sensor_dev_attr_temp1_max.dev_attr.attr,
+	return 0;
+}
+
+static int tmp102_write_chip(struct device *dev, u32 attr, long val)
+{
+	switch (attr) {
+	case hwmon_chip_update_interval:
+		return tmp102_update_interval(dev, val);
+	default:
+		return -EOPNOTSUPP;
+	}
+	return 0;
+}
+
+static int tmp102_write_temp(struct device *dev, u32 attr, long val)
+{
+	struct tmp102 *tmp102 = dev_get_drvdata(dev);
+	int reg;
+
+	switch (attr) {
+	case hwmon_temp_max_hyst:
+		reg = TMP102_TLOW_REG;
+		break;
+	case hwmon_temp_max:
+		reg = TMP102_THIGH_REG;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	val = clamp_val(val, -256000, 255000);
+	return regmap_write(tmp102->regmap, reg, tmp102_mC_to_reg(val));
+}
+
+static int tmp102_write(struct device *dev, enum hwmon_sensor_types type,
+			u32 attr, int channel, long val)
+{
+	switch (type) {
+	case hwmon_chip:
+		return tmp102_write_chip(dev, attr, val);
+	case hwmon_temp:
+		return tmp102_write_temp(dev, attr, val);
+	default:
+		return -EOPNOTSUPP;
+	}
+	return 0;
+}
+
+static umode_t tmp102_is_visible(const void *data, enum hwmon_sensor_types type,
+				 u32 attr, int channel)
+{
+	const struct tmp102 *tmp102 = data;
+
+	switch (type) {
+	case hwmon_chip:
+		switch (attr) {
+		case hwmon_chip_update_interval:
+			return 0644;
+		default:
+			break;
+		}
+		break;
+	case hwmon_temp:
+		switch (attr) {
+		case hwmon_temp_input:
+			return 0444;
+		case hwmon_temp_label:
+			if (tmp102->label)
+				return 0444;
+			return 0;
+		case hwmon_temp_max_hyst:
+		case hwmon_temp_max:
+			return 0644;
+		default:
+			break;
+		}
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
+static const struct hwmon_channel_info * const tmp102_info[] = {
+	HWMON_CHANNEL_INFO(chip,
+			   HWMON_C_REGISTER_TZ | HWMON_C_UPDATE_INTERVAL),
+	HWMON_CHANNEL_INFO(temp,
+			   HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX | HWMON_T_MAX_HYST),
 	NULL
 };
-ATTRIBUTE_GROUPS(tmp102);
 
-static const struct thermal_zone_of_device_ops tmp102_of_thermal_ops = {
-	.get_temp = tmp102_read_temp,
+static const struct hwmon_ops tmp102_hwmon_ops = {
+	.is_visible = tmp102_is_visible,
+	.read_string = tmp102_read_string,
+	.read = tmp102_read,
+	.write = tmp102_write,
+};
+
+static const struct hwmon_chip_info tmp102_chip_info = {
+	.ops = &tmp102_hwmon_ops,
+	.info = tmp102_info,
 };
 
 static void tmp102_restore_config(void *data)
@@ -183,12 +285,12 @@ static const struct regmap_config tmp102_regmap_config = {
 	.writeable_reg = tmp102_is_writeable_reg,
 	.volatile_reg = tmp102_is_volatile_reg,
 	.val_format_endian = REGMAP_ENDIAN_BIG,
-	.cache_type = REGCACHE_RBTREE,
-	.use_single_rw = true,
+	.cache_type = REGCACHE_MAPLE,
+	.use_single_read = true,
+	.use_single_write = true,
 };
 
-static int tmp102_probe(struct i2c_client *client,
-				  const struct i2c_device_id *id)
+static int tmp102_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct device *hwmon_dev;
@@ -203,15 +305,23 @@ static int tmp102_probe(struct i2c_client *client,
 		return -ENODEV;
 	}
 
+	err = devm_regulator_get_enable_optional(dev, "vcc");
+	if (err < 0 && err != -ENODEV)
+		return dev_err_probe(dev, err, "Failed to enable regulator\n");
+
 	tmp102 = devm_kzalloc(dev, sizeof(*tmp102), GFP_KERNEL);
 	if (!tmp102)
 		return -ENOMEM;
+
+	device_property_read_string(dev, "label", &tmp102->label);
 
 	i2c_set_clientdata(client, tmp102);
 
 	tmp102->regmap = devm_regmap_init_i2c(client, &tmp102_regmap_config);
 	if (IS_ERR(tmp102->regmap))
 		return PTR_ERR(tmp102->regmap);
+
+	tmp102->sample_time = DEFAULT_SAMPLE_TIME_MS;
 
 	err = regmap_read(tmp102->regmap, TMP102_CONF_REG, &regval);
 	if (err < 0) {
@@ -240,31 +350,25 @@ static int tmp102_probe(struct i2c_client *client,
 		return err;
 	}
 
-	tmp102->ready_time = jiffies;
-	if (tmp102->config_orig & TMP102_CONF_SD) {
-		/*
-		 * Mark that we are not ready with data until the first
-		 * conversion is complete
-		 */
-		tmp102->ready_time += msecs_to_jiffies(CONVERSION_TIME_MS);
-	}
+	/*
+	 * Mark that we are not ready with data until the first
+	 * conversion is complete
+	 */
+	tmp102->ready_time = get_jiffies_64() + msecs_to_jiffies(CONVERSION_TIME_MS);
 
-	hwmon_dev = devm_hwmon_device_register_with_groups(dev, client->name,
-							   tmp102,
-							   tmp102_groups);
+	hwmon_dev = devm_hwmon_device_register_with_info(dev, client->name,
+							 tmp102,
+							 &tmp102_chip_info,
+							 NULL);
 	if (IS_ERR(hwmon_dev)) {
 		dev_dbg(dev, "unable to register hwmon device\n");
 		return PTR_ERR(hwmon_dev);
 	}
-	devm_thermal_zone_of_sensor_register(hwmon_dev, 0, hwmon_dev,
-					     &tmp102_of_thermal_ops);
-
 	dev_info(dev, "initialized\n");
 
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int tmp102_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
@@ -283,23 +387,31 @@ static int tmp102_resume(struct device *dev)
 	err = regmap_update_bits(tmp102->regmap, TMP102_CONF_REG,
 				 TMP102_CONF_SD, 0);
 
-	tmp102->ready_time = jiffies + msecs_to_jiffies(CONVERSION_TIME_MS);
+	tmp102->ready_time = get_jiffies_64() + msecs_to_jiffies(CONVERSION_TIME_MS);
 
 	return err;
 }
-#endif /* CONFIG_PM */
 
-static SIMPLE_DEV_PM_OPS(tmp102_dev_pm_ops, tmp102_suspend, tmp102_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(tmp102_dev_pm_ops, tmp102_suspend, tmp102_resume);
 
 static const struct i2c_device_id tmp102_id[] = {
-	{ "tmp102", 0 },
+	{ .name = "tmp102" },
+	{ .name = "tmp110" },
+	{ .name = "tmp113" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tmp102_id);
 
+static const struct of_device_id tmp102_of_match[] = {
+	{ .compatible = "ti,tmp102" },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, tmp102_of_match);
+
 static struct i2c_driver tmp102_driver = {
 	.driver.name	= DRIVER_NAME,
-	.driver.pm	= &tmp102_dev_pm_ops,
+	.driver.of_match_table = tmp102_of_match,
+	.driver.pm	= pm_sleep_ptr(&tmp102_dev_pm_ops),
 	.probe		= tmp102_probe,
 	.id_table	= tmp102_id,
 };

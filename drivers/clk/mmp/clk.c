@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/io.h>
 #include <linux/clk-provider.h>
 #include <linux/slab.h>
@@ -9,9 +10,9 @@
 void mmp_clk_init(struct device_node *np, struct mmp_clk_unit *unit,
 		int nr_clks)
 {
-	static struct clk **clk_table;
+	struct clk **clk_table;
 
-	clk_table = kcalloc(nr_clks, sizeof(struct clk *), GFP_KERNEL);
+	clk_table = kzalloc_objs(struct clk *, nr_clks);
 	if (!clk_table)
 		return;
 
@@ -182,7 +183,7 @@ void mmp_clk_add(struct mmp_clk_unit *unit, unsigned int id,
 		pr_err("CLK %d has invalid pointer %p\n", id, clk);
 		return;
 	}
-	if (id > unit->nr_clks) {
+	if (id >= unit->nr_clks) {
 		pr_err("CLK %d is invalid\n", id);
 		return;
 	}

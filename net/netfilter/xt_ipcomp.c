@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*  Kernel module to match IPComp parameters for IPv4 and IPv6
  *
  *  Copyright (C) 2013 WindRiver
@@ -7,11 +8,6 @@
  *
  *  Based on:
  *  net/netfilter/xt_esp.c
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -26,17 +22,14 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Fan Du <fan.du@windriver.com>");
 MODULE_DESCRIPTION("Xtables: IPv4/6 IPsec-IPComp SPI match");
+MODULE_ALIAS("ipt_ipcomp");
+MODULE_ALIAS("ip6t_ipcomp");
 
 /* Returns 1 if the spi is matched by the range, 0 otherwise */
 static inline bool
 spi_match(u_int32_t min, u_int32_t max, u_int32_t spi, bool invert)
 {
-	bool r;
-	pr_debug("spi_match:%c 0x%x <= 0x%x <= 0x%x\n",
-		 invert ? '!' : ' ', min, spi, max);
-	r = (spi >= min && spi <= max) ^ invert;
-	pr_debug(" result %s\n", r ? "PASS" : "FAILED");
-	return r;
+	return (spi >= min && spi <= max) ^ invert;
 }
 
 static bool comp_mt(const struct sk_buff *skb, struct xt_action_param *par)
@@ -54,9 +47,8 @@ static bool comp_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		/* We've been asked to examine this packet, and we
 		 * can't.  Hence, no choice but to drop.
 		 */
-		pr_debug("Dropping evil IPComp tinygram.\n");
 		par->hotdrop = true;
-		return 0;
+		return false;
 	}
 
 	return spi_match(compinfo->spis[0], compinfo->spis[1],
@@ -70,7 +62,7 @@ static int comp_mt_check(const struct xt_mtchk_param *par)
 
 	/* Must specify no unknown invflags */
 	if (compinfo->invflags & ~XT_IPCOMP_INV_MASK) {
-		pr_err("unknown flags %X\n", compinfo->invflags);
+		pr_info_ratelimited("unknown flags %X\n", compinfo->invflags);
 		return -EINVAL;
 	}
 	return 0;

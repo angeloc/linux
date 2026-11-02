@@ -80,14 +80,14 @@ static int ar9002_hw_init_mode_regs(struct ath_hw *ah)
 	/* iniAddac needs to be modified for these chips */
 	if (AR_SREV_9160(ah) || !AR_SREV_5416_22_OR_LATER(ah)) {
 		struct ar5416IniArray *addac = &ah->iniAddac;
-		u32 size = sizeof(u32) * addac->ia_rows * addac->ia_columns;
+		u32 n = addac->ia_rows * addac->ia_columns;
 		u32 *data;
 
-		data = devm_kzalloc(ah->dev, size, GFP_KERNEL);
+		data = devm_kmemdup_array(ah->dev, addac->ia_array, n, sizeof(u32),
+			GFP_KERNEL);
 		if (!data)
 			return -ENOMEM;
 
-		memcpy(data, addac->ia_array, size);
 		addac->ia_array = data;
 
 		if (!AR_SREV_5416_22_OR_LATER(ah)) {
@@ -108,8 +108,7 @@ static void ar9280_20_hw_init_rxgain_ini(struct ath_hw *ah)
 {
 	u32 rxgain_type;
 
-	if (ah->eep_ops->get_eeprom(ah, EEP_MINOR_REV) >=
-	    AR5416_EEP_MINOR_VER_17) {
+	if (ah->eep_ops->get_eeprom_rev(ah) >= AR5416_EEP_MINOR_VER_17) {
 		rxgain_type = ah->eep_ops->get_eeprom(ah, EEP_RXGAIN_TYPE);
 
 		if (rxgain_type == AR5416_EEP_RXGAIN_13DB_BACKOFF)
@@ -129,8 +128,7 @@ static void ar9280_20_hw_init_rxgain_ini(struct ath_hw *ah)
 
 static void ar9280_20_hw_init_txgain_ini(struct ath_hw *ah, u32 txgain_type)
 {
-	if (ah->eep_ops->get_eeprom(ah, EEP_MINOR_REV) >=
-	    AR5416_EEP_MINOR_VER_19) {
+	if (ah->eep_ops->get_eeprom_rev(ah) >= AR5416_EEP_MINOR_VER_19) {
 		if (txgain_type == AR5416_EEP_TXGAIN_HIGH_POWER)
 			INIT_INI_ARRAY(&ah->iniModesTxGain,
 				       ar9280Modes_high_power_tx_gain_9280_2);
@@ -251,9 +249,9 @@ static void ar9002_hw_configpcipowersave(struct ath_hw *ah,
 
 	if (power_off) {
 		/* clear bit 19 to disable L1 */
-		REG_CLR_BIT(ah, AR_PCIE_PM_CTRL, AR_PCIE_PM_CTRL_ENA);
+		REG_CLR_BIT(ah, AR_PCIE_PM_CTRL(ah), AR_PCIE_PM_CTRL_ENA);
 
-		val = REG_READ(ah, AR_WA);
+		val = REG_READ(ah, AR_WA(ah));
 
 		/*
 		 * Set PCIe workaround bits
@@ -288,7 +286,7 @@ static void ar9002_hw_configpcipowersave(struct ath_hw *ah,
 		if (AR_SREV_9285E_20(ah))
 			val |= AR_WA_BIT23;
 
-		REG_WRITE(ah, AR_WA, val);
+		REG_WRITE(ah, AR_WA(ah), val);
 	} else {
 		if (ah->config.pcie_waen) {
 			val = ah->config.pcie_waen;
@@ -316,10 +314,10 @@ static void ar9002_hw_configpcipowersave(struct ath_hw *ah,
 		if (AR_SREV_9285E_20(ah))
 			val |= AR_WA_BIT23;
 
-		REG_WRITE(ah, AR_WA, val);
+		REG_WRITE(ah, AR_WA(ah), val);
 
 		/* set bit 19 to allow forcing of pcie core into L1 state */
-		REG_SET_BIT(ah, AR_PCIE_PM_CTRL, AR_PCIE_PM_CTRL_ENA);
+		REG_SET_BIT(ah, AR_PCIE_PM_CTRL(ah), AR_PCIE_PM_CTRL_ENA);
 	}
 }
 
@@ -397,7 +395,7 @@ static void ar9002_hw_init_hang_checks(struct ath_hw *ah)
 		ah->config.hw_hang_checks |= HW_MAC_HANG;
 }
 
-/* Sets up the AR5008/AR9001/AR9002 hardware familiy callbacks */
+/* Sets up the AR5008/AR9001/AR9002 hardware family callbacks */
 int ar9002_hw_attach_ops(struct ath_hw *ah)
 {
 	struct ath_hw_private_ops *priv_ops = ath9k_hw_private_ops(ah);

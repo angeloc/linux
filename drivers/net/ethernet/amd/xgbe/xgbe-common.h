@@ -1,117 +1,8 @@
+// SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-3-Clause)
 /*
- * AMD 10Gb Ethernet driver
- *
- * This file is available to you under your choice of the following two
- * licenses:
- *
- * License 1: GPLv2
- *
- * Copyright (c) 2014-2016 Advanced Micro Devices, Inc.
- *
- * This file is free software; you may copy, redistribute and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or (at
- * your option) any later version.
- *
- * This file is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * This file incorporates work covered by the following copyright and
- * permission notice:
- *     The Synopsys DWC ETHER XGMAC Software Driver and documentation
- *     (hereinafter "Software") is an unsupported proprietary work of Synopsys,
- *     Inc. unless otherwise expressly agreed to in writing between Synopsys
- *     and you.
- *
- *     The Software IS NOT an item of Licensed Software or Licensed Product
- *     under any End User Software License Agreement or Agreement for Licensed
- *     Product with Synopsys or any supplement thereto.  Permission is hereby
- *     granted, free of charge, to any person obtaining a copy of this software
- *     annotated with this license and the Software, to deal in the Software
- *     without restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- *     of the Software, and to permit persons to whom the Software is furnished
- *     to do so, subject to the following conditions:
- *
- *     The above copyright notice and this permission notice shall be included
- *     in all copies or substantial portions of the Software.
- *
- *     THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS"
- *     BASIS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- *     TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- *     PARTICULAR PURPOSE ARE HEREBY DISCLAIMED. IN NO EVENT SHALL SYNOPSYS
- *     BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- *     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- *     THE POSSIBILITY OF SUCH DAMAGE.
- *
- *
- * License 2: Modified BSD
- *
- * Copyright (c) 2014-2016 Advanced Micro Devices, Inc.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of Advanced Micro Devices, Inc. nor the
- *       names of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
- * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * This file incorporates work covered by the following copyright and
- * permission notice:
- *     The Synopsys DWC ETHER XGMAC Software Driver and documentation
- *     (hereinafter "Software") is an unsupported proprietary work of Synopsys,
- *     Inc. unless otherwise expressly agreed to in writing between Synopsys
- *     and you.
- *
- *     The Software IS NOT an item of Licensed Software or Licensed Product
- *     under any End User Software License Agreement or Agreement for Licensed
- *     Product with Synopsys or any supplement thereto.  Permission is hereby
- *     granted, free of charge, to any person obtaining a copy of this software
- *     annotated with this license and the Software, to deal in the Software
- *     without restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or sell copies
- *     of the Software, and to permit persons to whom the Software is furnished
- *     to do so, subject to the following conditions:
- *
- *     The above copyright notice and this permission notice shall be included
- *     in all copies or substantial portions of the Software.
- *
- *     THIS SOFTWARE IS BEING DISTRIBUTED BY SYNOPSYS SOLELY ON AN "AS IS"
- *     BASIS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- *     TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- *     PARTICULAR PURPOSE ARE HEREBY DISCLAIMED. IN NO EVENT SHALL SYNOPSYS
- *     BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *     CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *     SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- *     INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- *     THE POSSIBILITY OF SUCH DAMAGE.
+ * Copyright (c) 2014-2025, Advanced Micro Devices, Inc.
+ * Copyright (c) 2014, Synopsys, Inc.
+ * All rights reserved
  */
 
 #ifndef __XGBE_COMMON_H__
@@ -123,52 +14,46 @@
 #define DMA_ISR				0x3008
 #define DMA_AXIARCR			0x3010
 #define DMA_AXIAWCR			0x3018
+#define DMA_AXIAWARCR			0x301c
 #define DMA_DSR0			0x3020
 #define DMA_DSR1			0x3024
+#define DMA_TXEDMACR			0x3040
+#define DMA_RXEDMACR			0x3044
 
 /* DMA register entry bit positions and sizes */
-#define DMA_AXIARCR_DRC_INDEX		0
-#define DMA_AXIARCR_DRC_WIDTH		4
-#define DMA_AXIARCR_DRD_INDEX		4
-#define DMA_AXIARCR_DRD_WIDTH		2
-#define DMA_AXIARCR_TEC_INDEX		8
-#define DMA_AXIARCR_TEC_WIDTH		4
-#define DMA_AXIARCR_TED_INDEX		12
-#define DMA_AXIARCR_TED_WIDTH		2
-#define DMA_AXIARCR_THC_INDEX		16
-#define DMA_AXIARCR_THC_WIDTH		4
-#define DMA_AXIARCR_THD_INDEX		20
-#define DMA_AXIARCR_THD_WIDTH		2
-#define DMA_AXIAWCR_DWC_INDEX		0
-#define DMA_AXIAWCR_DWC_WIDTH		4
-#define DMA_AXIAWCR_DWD_INDEX		4
-#define DMA_AXIAWCR_DWD_WIDTH		2
-#define DMA_AXIAWCR_RPC_INDEX		8
-#define DMA_AXIAWCR_RPC_WIDTH		4
-#define DMA_AXIAWCR_RPD_INDEX		12
-#define DMA_AXIAWCR_RPD_WIDTH		2
-#define DMA_AXIAWCR_RHC_INDEX		16
-#define DMA_AXIAWCR_RHC_WIDTH		4
-#define DMA_AXIAWCR_RHD_INDEX		20
-#define DMA_AXIAWCR_RHD_WIDTH		2
-#define DMA_AXIAWCR_TDC_INDEX		24
-#define DMA_AXIAWCR_TDC_WIDTH		4
-#define DMA_AXIAWCR_TDD_INDEX		28
-#define DMA_AXIAWCR_TDD_WIDTH		2
 #define DMA_ISR_MACIS_INDEX		17
 #define DMA_ISR_MACIS_WIDTH		1
 #define DMA_ISR_MTLIS_INDEX		16
 #define DMA_ISR_MTLIS_WIDTH		1
+#define DMA_MR_INTM_INDEX		12
+#define DMA_MR_INTM_WIDTH		2
 #define DMA_MR_SWR_INDEX		0
 #define DMA_MR_SWR_WIDTH		1
+#define DMA_RXEDMACR_RDPS_INDEX		0
+#define DMA_RXEDMACR_RDPS_WIDTH		3
+#define DMA_SBMR_AAL_INDEX		12
+#define DMA_SBMR_AAL_WIDTH		1
 #define DMA_SBMR_EAME_INDEX		11
 #define DMA_SBMR_EAME_WIDTH		1
-#define DMA_SBMR_BLEN_256_INDEX		7
-#define DMA_SBMR_BLEN_256_WIDTH		1
+#define DMA_SBMR_BLEN_INDEX		1
+#define DMA_SBMR_BLEN_WIDTH		7
+#define DMA_SBMR_RD_OSR_LMT_INDEX	16
+#define DMA_SBMR_RD_OSR_LMT_WIDTH	6
 #define DMA_SBMR_UNDEF_INDEX		0
 #define DMA_SBMR_UNDEF_WIDTH		1
+#define DMA_SBMR_WR_OSR_LMT_INDEX	24
+#define DMA_SBMR_WR_OSR_LMT_WIDTH	6
+#define DMA_TXEDMACR_TDPS_INDEX		0
+#define DMA_TXEDMACR_TDPS_WIDTH		3
 
 /* DMA register values */
+#define DMA_SBMR_BLEN_256		256
+#define DMA_SBMR_BLEN_128		128
+#define DMA_SBMR_BLEN_64		64
+#define DMA_SBMR_BLEN_32		32
+#define DMA_SBMR_BLEN_16		16
+#define DMA_SBMR_BLEN_8			8
+#define DMA_SBMR_BLEN_4			4
 #define DMA_DSR_RPS_WIDTH		4
 #define DMA_DSR_TPS_WIDTH		4
 #define DMA_DSR_Q_WIDTH			(DMA_DSR_RPS_WIDTH + DMA_DSR_TPS_WIDTH)
@@ -216,11 +101,15 @@
 #define DMA_CH_CR_PBLX8_WIDTH		1
 #define DMA_CH_CR_SPH_INDEX		24
 #define DMA_CH_CR_SPH_WIDTH		1
-#define DMA_CH_IER_AIE_INDEX		15
+#define DMA_CH_IER_AIE20_INDEX		15
+#define DMA_CH_IER_AIE20_WIDTH		1
+#define DMA_CH_IER_AIE_INDEX		14
 #define DMA_CH_IER_AIE_WIDTH		1
 #define DMA_CH_IER_FBEE_INDEX		12
 #define DMA_CH_IER_FBEE_WIDTH		1
-#define DMA_CH_IER_NIE_INDEX		16
+#define DMA_CH_IER_NIE20_INDEX		16
+#define DMA_CH_IER_NIE20_WIDTH		1
+#define DMA_CH_IER_NIE_INDEX		15
 #define DMA_CH_IER_NIE_WIDTH		1
 #define DMA_CH_IER_RBUE_INDEX		7
 #define DMA_CH_IER_RBUE_WIDTH		1
@@ -304,11 +193,17 @@
 #define MAC_RWKPFR			0x00c4
 #define MAC_LPICSR			0x00d0
 #define MAC_LPITCR			0x00d4
+#define MAC_TIR				0x00e0
 #define MAC_VR				0x0110
 #define MAC_DR				0x0114
 #define MAC_HWF0R			0x011c
 #define MAC_HWF1R			0x0120
 #define MAC_HWF2R			0x0124
+#define MAC_MDIOSCAR			0x0200
+#define MAC_MDIOSCCDR			0x0204
+#define MAC_MDIOISR			0x0214
+#define MAC_MDIOIER			0x0218
+#define MAC_MDIOCL22R			0x0220
 #define MAC_GPIOCR			0x0278
 #define MAC_GPIOSR			0x027c
 #define MAC_MACA0HR			0x0300
@@ -328,13 +223,33 @@
 #define MAC_TSSR			0x0d20
 #define MAC_TXSNR			0x0d30
 #define MAC_TXSSR			0x0d34
-
+#define MAC_TICNR                       0x0d58
+#define MAC_TICSNR                      0x0d5C
+#define MAC_TECNR                       0x0d60
+#define MAC_TECSNR                      0x0d64
+#define MAC_PPSCR			0x0d70
+#define MAC_PPS0_TTSR			0x0d80
+#define MAC_PPS0_TTNSR			0x0d84
+#define MAC_PPS0_INTERVAL		0x0d88
+#define MAC_PPS0_WIDTH			0x0d8C
 #define MAC_QTFCR_INC			4
 #define MAC_MACA_INC			4
 #define MAC_HTR_INC			4
 
 #define MAC_RQC2_INC			4
 #define MAC_RQC2_Q_PER_REG		4
+
+/* PPS helpers */
+#define PPSEN0				BIT(4)
+#define MAC_PPSx_TTSR(x)		((MAC_PPS0_TTSR) + ((x) * 0x10))
+#define MAC_PPSx_TTNSR(x)		((MAC_PPS0_TTNSR) + ((x) * 0x10))
+#define MAC_PPSx_INTERVAL(x)		((MAC_PPS0_INTERVAL) + ((x) * 0x10))
+#define MAC_PPSx_WIDTH(x)		((MAC_PPS0_WIDTH) + ((x) * 0x10))
+#define PPS_MAXIDX(x)			((((x) + 1) * 8) - 1)
+#define PPS_MINIDX(x)			((x) * 8)
+#define XGBE_PPSCMD_STOP		0x5
+#define XGBE_PPSCMD_START		0x2
+#define XGBE_PPSTARGET_PULSE		0x2
 
 /* MAC register entry bit positions and sizes */
 #define MAC_HWF0R_ADDMACADRSEL_INDEX	18
@@ -365,6 +280,8 @@
 #define MAC_HWF0R_TXCOESEL_WIDTH	1
 #define MAC_HWF0R_VLHASH_INDEX		4
 #define MAC_HWF0R_VLHASH_WIDTH		1
+#define MAC_HWF0R_VXN_INDEX		29
+#define MAC_HWF0R_VXN_WIDTH		1
 #define MAC_HWF1R_ADDR64_INDEX		14
 #define MAC_HWF1R_ADDR64_WIDTH		2
 #define MAC_HWF1R_ADVTHWORD_INDEX	13
@@ -409,10 +326,36 @@
 #define MAC_ISR_MMCTXIS_WIDTH		1
 #define MAC_ISR_PMTIS_INDEX		4
 #define MAC_ISR_PMTIS_WIDTH		1
+#define MAC_ISR_SMI_INDEX		1
+#define MAC_ISR_SMI_WIDTH		1
 #define MAC_ISR_TSIS_INDEX		12
 #define MAC_ISR_TSIS_WIDTH		1
+#define MAC_ISR_LS_INDEX		24
+#define MAC_ISR_LS_WIDTH		2
+#define MAC_ISR_LSI_INDEX		0
+#define MAC_ISR_LSI_WIDTH		1
 #define MAC_MACA1HR_AE_INDEX		31
 #define MAC_MACA1HR_AE_WIDTH		1
+#define MAC_MDIOIER_SNGLCOMPIE_INDEX	12
+#define MAC_MDIOIER_SNGLCOMPIE_WIDTH	1
+#define MAC_MDIOISR_SNGLCOMPINT_INDEX	12
+#define MAC_MDIOISR_SNGLCOMPINT_WIDTH	1
+#define MAC_MDIOSCAR_DA_INDEX		21
+#define MAC_MDIOSCAR_DA_WIDTH		5
+#define MAC_MDIOSCAR_PA_INDEX		16
+#define MAC_MDIOSCAR_PA_WIDTH		5
+#define MAC_MDIOSCAR_RA_INDEX		0
+#define MAC_MDIOSCAR_RA_WIDTH		16
+#define MAC_MDIOSCCDR_BUSY_INDEX	22
+#define MAC_MDIOSCCDR_BUSY_WIDTH	1
+#define MAC_MDIOSCCDR_CMD_INDEX		16
+#define MAC_MDIOSCCDR_CMD_WIDTH		2
+#define MAC_MDIOSCCDR_CR_INDEX		19
+#define MAC_MDIOSCCDR_CR_WIDTH		3
+#define MAC_MDIOSCCDR_DATA_INDEX	0
+#define MAC_MDIOSCCDR_DATA_WIDTH	16
+#define MAC_MDIOSCCDR_SADDR_INDEX	18
+#define MAC_MDIOSCCDR_SADDR_WIDTH	1
 #define MAC_PFR_HMC_INDEX		2
 #define MAC_PFR_HMC_WIDTH		1
 #define MAC_PFR_HPF_INDEX		10
@@ -425,6 +368,8 @@
 #define MAC_PFR_PR_WIDTH		1
 #define MAC_PFR_VTFE_INDEX		16
 #define MAC_PFR_VTFE_WIDTH		1
+#define MAC_PFR_VUCC_INDEX		22
+#define MAC_PFR_VUCC_WIDTH		1
 #define MAC_PMTCSR_MGKPKTEN_INDEX	1
 #define MAC_PMTCSR_MGKPKTEN_WIDTH	1
 #define MAC_PMTCSR_PWRDWN_INDEX		0
@@ -443,6 +388,10 @@
 #define MAC_RCR_CST_WIDTH		1
 #define MAC_RCR_DCRCC_INDEX		3
 #define MAC_RCR_DCRCC_WIDTH		1
+#define MAC_RCR_GPSLCE_INDEX		6
+#define MAC_RCR_GPSLCE_WIDTH		1
+#define MAC_RCR_WD_INDEX		7
+#define MAC_RCR_WD_WIDTH		1
 #define MAC_RCR_HDSMS_INDEX		12
 #define MAC_RCR_HDSMS_WIDTH		3
 #define MAC_RCR_IPC_INDEX		9
@@ -453,6 +402,8 @@
 #define MAC_RCR_LM_WIDTH		1
 #define MAC_RCR_RE_INDEX		0
 #define MAC_RCR_RE_WIDTH		1
+#define MAC_RCR_GPSL_INDEX		16
+#define MAC_RCR_GPSL_WIDTH		14
 #define MAC_RFCR_PFCE_INDEX		8
 #define MAC_RFCR_PFCE_WIDTH		1
 #define MAC_RFCR_RFE_INDEX		0
@@ -484,15 +435,25 @@
 #define MAC_SSIR_SSINC_INDEX		16
 #define MAC_SSIR_SSINC_WIDTH		8
 #define MAC_TCR_SS_INDEX		29
-#define MAC_TCR_SS_WIDTH		2
+#define MAC_TCR_SS_WIDTH		3
 #define MAC_TCR_TE_INDEX		0
 #define MAC_TCR_TE_WIDTH		1
+#define MAC_TCR_VNE_INDEX		24
+#define MAC_TCR_VNE_WIDTH		1
+#define MAC_TCR_VNM_INDEX		25
+#define MAC_TCR_VNM_WIDTH		1
+#define MAC_TCR_JD_INDEX		16
+#define MAC_TCR_JD_WIDTH		1
+#define MAC_TIR_TNID_INDEX		0
+#define MAC_TIR_TNID_WIDTH		16
 #define MAC_TSCR_AV8021ASMEN_INDEX	28
 #define MAC_TSCR_AV8021ASMEN_WIDTH	1
 #define MAC_TSCR_SNAPTYPSEL_INDEX	16
 #define MAC_TSCR_SNAPTYPSEL_WIDTH	2
 #define MAC_TSCR_TSADDREG_INDEX		5
 #define MAC_TSCR_TSADDREG_WIDTH		1
+#define MAC_TSCR_TSUPDT_INDEX		3
+#define MAC_TSCR_TSUPDT_WIDTH		1
 #define MAC_TSCR_TSCFUPDT_INDEX		1
 #define MAC_TSCR_TSCFUPDT_WIDTH		1
 #define MAC_TSCR_TSCTRLSSR_INDEX	9
@@ -521,6 +482,10 @@
 #define MAC_TSSR_TXTSC_WIDTH		1
 #define MAC_TXSNR_TXTSSTSMIS_INDEX	31
 #define MAC_TXSNR_TXTSSTSMIS_WIDTH	1
+#define MAC_TICSNR_TSICSNS_INDEX	8
+#define MAC_TICSNR_TSICSNS_WIDTH	8
+#define MAC_TECSNR_TSECSNS_INDEX	8
+#define MAC_TECSNR_TSECSNS_WIDTH	8
 #define MAC_VLANHTR_VLHT_INDEX		0
 #define MAC_VLANHTR_VLHT_WIDTH		16
 #define MAC_VLANIR_VLTI_INDEX		20
@@ -551,8 +516,10 @@
 #define MAC_VR_SNPSVER_WIDTH		8
 #define MAC_VR_USERVER_INDEX		16
 #define MAC_VR_USERVER_WIDTH		8
+#define MAC_PPSx_TTNSR_TRGTBUSY0_INDEX	31
+#define MAC_PPSx_TTNSR_TRGTBUSY0_WIDTH	1
 
-/* MMC register offsets */
+ /* MMC register offsets */
 #define MMC_CR				0x0800
 #define MMC_RISR			0x0804
 #define MMC_TISR			0x0808
@@ -635,6 +602,7 @@
 #define MMC_RXVLANFRAMES_GB_LO		0x0998
 #define MMC_RXVLANFRAMES_GB_HI		0x099c
 #define MMC_RXWATCHDOGERROR		0x09a0
+#define MMC_RXALIGNMENTERROR		0x09bc
 
 /* MMC register entry bit positions and sizes */
 #define MMC_CR_CR_INDEX				0
@@ -695,6 +663,8 @@
 #define MMC_RISR_RXVLANFRAMES_GB_WIDTH		1
 #define MMC_RISR_RXWATCHDOGERROR_INDEX		22
 #define MMC_RISR_RXWATCHDOGERROR_WIDTH		1
+#define MMC_RISR_RXALIGNMENTERROR_INDEX		27
+#define MMC_RISR_RXALIGNMENTERROR_WIDTH		1
 #define MMC_TIER_ALL_INTERRUPTS_INDEX		0
 #define MMC_TIER_ALL_INTERRUPTS_WIDTH		18
 #define MMC_TISR_TXOCTETCOUNT_GB_INDEX		0
@@ -790,6 +760,10 @@
 #define MTL_Q_RQOMR_RSF_WIDTH		1
 #define MTL_Q_RQOMR_RTC_INDEX		0
 #define MTL_Q_RQOMR_RTC_WIDTH		2
+#define MTL_Q_TQDR_TRCSTS_INDEX		1
+#define MTL_Q_TQDR_TRCSTS_WIDTH		2
+#define MTL_Q_TQDR_TXQSTS_INDEX		4
+#define MTL_Q_TQDR_TXQSTS_WIDTH		1
 #define MTL_Q_TQOMR_FTQ_INDEX		0
 #define MTL_Q_TQOMR_FTQ_WIDTH		1
 #define MTL_Q_TQOMR_Q2TCMAP_INDEX	8
@@ -852,14 +826,27 @@
 #define MTL_TSA_SP			0x00
 #define MTL_TSA_ETS			0x02
 
-/* PCS MMD select register offset
- *  The MMD select register is used for accessing PCS registers
- *  when the underlying APB3 interface is using indirect addressing.
- *  Indirect addressing requires accessing registers in two phases,
- *  an address phase and a data phase.  The address phases requires
- *  writing an address selection value to the MMD select regiesters.
- */
-#define PCS_MMD_SELECT			0xff
+/* PCS register offsets */
+#define PCS_V1_WINDOW_SELECT		0x03fc
+#define PCS_V2_WINDOW_DEF		0x9060
+#define PCS_V2_WINDOW_SELECT		0x9064
+#define PCS_V2_RV_WINDOW_DEF		0x1060
+#define PCS_V2_RV_WINDOW_SELECT		0x1064
+#define PCS_V2_YC_WINDOW_DEF		0x18060
+#define PCS_V2_YC_WINDOW_SELECT		0x18064
+#define PCS_V3_RN_WINDOW_DEF		0xf8078
+#define PCS_V3_RN_WINDOW_SELECT		0xf807c
+#define PCS_P100a_WINDOW_DEF		0x8060
+#define PCS_P100a_WINDOW_SELECT		0x8080
+
+#define PCS_RN_SMN_BASE_ADDR		0x11e00000
+#define PCS_RN_PORT_ADDR_SIZE		0x100000
+
+/* PCS register entry bit positions and sizes */
+#define PCS_V2_WINDOW_DEF_OFFSET_INDEX	6
+#define PCS_V2_WINDOW_DEF_OFFSET_WIDTH	14
+#define PCS_V2_WINDOW_DEF_SIZE_INDEX	2
+#define PCS_V2_WINDOW_DEF_SIZE_WIDTH	4
 
 /* SerDes integration register offsets */
 #define SIR0_KR_RT_1			0x002c
@@ -903,6 +890,199 @@
 #define RXTX_REG129_RXDFE_CONFIG_INDEX	14
 #define RXTX_REG129_RXDFE_CONFIG_WIDTH	2
 
+/* MAC Control register offsets */
+#define XP_PROP_0			0x0000
+#define XP_PROP_1			0x0004
+#define XP_PROP_2			0x0008
+#define XP_PROP_3			0x000c
+#define XP_PROP_4			0x0010
+#define XP_PROP_5			0x0014
+#define XP_MAC_ADDR_LO			0x0020
+#define XP_MAC_ADDR_HI			0x0024
+#define XP_ECC_ISR			0x0030
+#define XP_ECC_IER			0x0034
+#define XP_ECC_CNT0			0x003c
+#define XP_ECC_CNT1			0x0040
+#define XP_DRIVER_INT_REQ		0x0060
+#define XP_DRIVER_INT_RO		0x0064
+#define XP_DRIVER_SCRATCH_0		0x0068
+#define XP_DRIVER_SCRATCH_1		0x006c
+#define XP_INT_REISSUE_EN		0x0074
+#define XP_INT_EN			0x0078
+#define XP_I2C_MUTEX			0x0080
+#define XP_MDIO_MUTEX			0x0084
+
+/* MAC Control register entry bit positions and sizes */
+#define XP_DRIVER_INT_REQ_REQUEST_INDEX		0
+#define XP_DRIVER_INT_REQ_REQUEST_WIDTH		1
+#define XP_DRIVER_INT_RO_STATUS_INDEX		0
+#define XP_DRIVER_INT_RO_STATUS_WIDTH		1
+#define XP_DRIVER_SCRATCH_0_COMMAND_INDEX	0
+#define XP_DRIVER_SCRATCH_0_COMMAND_WIDTH	8
+#define XP_DRIVER_SCRATCH_0_SUB_COMMAND_INDEX	8
+#define XP_DRIVER_SCRATCH_0_SUB_COMMAND_WIDTH	8
+#define XP_ECC_CNT0_RX_DED_INDEX		24
+#define XP_ECC_CNT0_RX_DED_WIDTH		8
+#define XP_ECC_CNT0_RX_SEC_INDEX		16
+#define XP_ECC_CNT0_RX_SEC_WIDTH		8
+#define XP_ECC_CNT0_TX_DED_INDEX		8
+#define XP_ECC_CNT0_TX_DED_WIDTH		8
+#define XP_ECC_CNT0_TX_SEC_INDEX		0
+#define XP_ECC_CNT0_TX_SEC_WIDTH		8
+#define XP_ECC_CNT1_DESC_DED_INDEX		8
+#define XP_ECC_CNT1_DESC_DED_WIDTH		8
+#define XP_ECC_CNT1_DESC_SEC_INDEX		0
+#define XP_ECC_CNT1_DESC_SEC_WIDTH		8
+#define XP_ECC_IER_DESC_DED_INDEX		5
+#define XP_ECC_IER_DESC_DED_WIDTH		1
+#define XP_ECC_IER_DESC_SEC_INDEX		4
+#define XP_ECC_IER_DESC_SEC_WIDTH		1
+#define XP_ECC_IER_RX_DED_INDEX			3
+#define XP_ECC_IER_RX_DED_WIDTH			1
+#define XP_ECC_IER_RX_SEC_INDEX			2
+#define XP_ECC_IER_RX_SEC_WIDTH			1
+#define XP_ECC_IER_TX_DED_INDEX			1
+#define XP_ECC_IER_TX_DED_WIDTH			1
+#define XP_ECC_IER_TX_SEC_INDEX			0
+#define XP_ECC_IER_TX_SEC_WIDTH			1
+#define XP_ECC_ISR_DESC_DED_INDEX		5
+#define XP_ECC_ISR_DESC_DED_WIDTH		1
+#define XP_ECC_ISR_DESC_SEC_INDEX		4
+#define XP_ECC_ISR_DESC_SEC_WIDTH		1
+#define XP_ECC_ISR_RX_DED_INDEX			3
+#define XP_ECC_ISR_RX_DED_WIDTH			1
+#define XP_ECC_ISR_RX_SEC_INDEX			2
+#define XP_ECC_ISR_RX_SEC_WIDTH			1
+#define XP_ECC_ISR_TX_DED_INDEX			1
+#define XP_ECC_ISR_TX_DED_WIDTH			1
+#define XP_ECC_ISR_TX_SEC_INDEX			0
+#define XP_ECC_ISR_TX_SEC_WIDTH			1
+#define XP_I2C_MUTEX_BUSY_INDEX			31
+#define XP_I2C_MUTEX_BUSY_WIDTH			1
+#define XP_I2C_MUTEX_ID_INDEX			29
+#define XP_I2C_MUTEX_ID_WIDTH			2
+#define XP_I2C_MUTEX_ACTIVE_INDEX		0
+#define XP_I2C_MUTEX_ACTIVE_WIDTH		1
+#define XP_MAC_ADDR_HI_VALID_INDEX		31
+#define XP_MAC_ADDR_HI_VALID_WIDTH		1
+#define XP_PROP_0_CONN_TYPE_INDEX		28
+#define XP_PROP_0_CONN_TYPE_WIDTH		3
+#define XP_PROP_0_MDIO_ADDR_INDEX		16
+#define XP_PROP_0_MDIO_ADDR_WIDTH		5
+#define XP_PROP_0_PORT_ID_INDEX			0
+#define XP_PROP_0_PORT_ID_WIDTH			8
+#define XP_PROP_0_PORT_MODE_INDEX		8
+#define XP_PROP_0_PORT_MODE_WIDTH		4
+#define XP_PROP_0_PORT_SPEEDS_INDEX		22
+#define XP_PROP_0_PORT_SPEEDS_WIDTH		6
+#define XP_PROP_1_MAX_RX_DMA_INDEX		24
+#define XP_PROP_1_MAX_RX_DMA_WIDTH		5
+#define XP_PROP_1_MAX_RX_QUEUES_INDEX		8
+#define XP_PROP_1_MAX_RX_QUEUES_WIDTH		5
+#define XP_PROP_1_MAX_TX_DMA_INDEX		16
+#define XP_PROP_1_MAX_TX_DMA_WIDTH		5
+#define XP_PROP_1_MAX_TX_QUEUES_INDEX		0
+#define XP_PROP_1_MAX_TX_QUEUES_WIDTH		5
+#define XP_PROP_2_RX_FIFO_SIZE_INDEX		16
+#define XP_PROP_2_RX_FIFO_SIZE_WIDTH		16
+#define XP_PROP_2_TX_FIFO_SIZE_INDEX		0
+#define XP_PROP_2_TX_FIFO_SIZE_WIDTH		16
+#define XP_PROP_3_GPIO_MASK_INDEX		28
+#define XP_PROP_3_GPIO_MASK_WIDTH		4
+#define XP_PROP_3_GPIO_MOD_ABS_INDEX		20
+#define XP_PROP_3_GPIO_MOD_ABS_WIDTH		4
+#define XP_PROP_3_GPIO_RATE_SELECT_INDEX	16
+#define XP_PROP_3_GPIO_RATE_SELECT_WIDTH	4
+#define XP_PROP_3_GPIO_RX_LOS_INDEX		24
+#define XP_PROP_3_GPIO_RX_LOS_WIDTH		4
+#define XP_PROP_3_GPIO_TX_FAULT_INDEX		12
+#define XP_PROP_3_GPIO_TX_FAULT_WIDTH		4
+#define XP_PROP_3_GPIO_ADDR_INDEX		8
+#define XP_PROP_3_GPIO_ADDR_WIDTH		3
+#define XP_PROP_3_MDIO_RESET_INDEX		0
+#define XP_PROP_3_MDIO_RESET_WIDTH		2
+#define XP_PROP_3_MDIO_RESET_I2C_ADDR_INDEX	8
+#define XP_PROP_3_MDIO_RESET_I2C_ADDR_WIDTH	3
+#define XP_PROP_3_MDIO_RESET_I2C_GPIO_INDEX	12
+#define XP_PROP_3_MDIO_RESET_I2C_GPIO_WIDTH	4
+#define XP_PROP_3_MDIO_RESET_INT_GPIO_INDEX	4
+#define XP_PROP_3_MDIO_RESET_INT_GPIO_WIDTH	2
+#define XP_PROP_4_MUX_ADDR_HI_INDEX		8
+#define XP_PROP_4_MUX_ADDR_HI_WIDTH		5
+#define XP_PROP_4_MUX_ADDR_LO_INDEX		0
+#define XP_PROP_4_MUX_ADDR_LO_WIDTH		3
+#define XP_PROP_4_MUX_CHAN_INDEX		4
+#define XP_PROP_4_MUX_CHAN_WIDTH		3
+#define XP_PROP_4_REDRV_ADDR_INDEX		16
+#define XP_PROP_4_REDRV_ADDR_WIDTH		7
+#define XP_PROP_4_REDRV_IF_INDEX		23
+#define XP_PROP_4_REDRV_IF_WIDTH		1
+#define XP_PROP_4_REDRV_LANE_INDEX		24
+#define XP_PROP_4_REDRV_LANE_WIDTH		3
+#define XP_PROP_4_REDRV_MODEL_INDEX		28
+#define XP_PROP_4_REDRV_MODEL_WIDTH		3
+#define XP_PROP_4_REDRV_PRESENT_INDEX		31
+#define XP_PROP_4_REDRV_PRESENT_WIDTH		1
+
+/* I2C Control register offsets */
+#define IC_CON					0x0000
+#define IC_TAR					0x0004
+#define IC_DATA_CMD				0x0010
+#define IC_INTR_STAT				0x002c
+#define IC_INTR_MASK				0x0030
+#define IC_RAW_INTR_STAT			0x0034
+#define IC_CLR_INTR				0x0040
+#define IC_CLR_TX_ABRT				0x0054
+#define IC_CLR_STOP_DET				0x0060
+#define IC_ENABLE				0x006c
+#define IC_TXFLR				0x0074
+#define IC_RXFLR				0x0078
+#define IC_TX_ABRT_SOURCE			0x0080
+#define IC_ENABLE_STATUS			0x009c
+#define IC_COMP_PARAM_1				0x00f4
+
+/* I2C Control register entry bit positions and sizes */
+#define IC_COMP_PARAM_1_MAX_SPEED_MODE_INDEX	2
+#define IC_COMP_PARAM_1_MAX_SPEED_MODE_WIDTH	2
+#define IC_COMP_PARAM_1_RX_BUFFER_DEPTH_INDEX	8
+#define IC_COMP_PARAM_1_RX_BUFFER_DEPTH_WIDTH	8
+#define IC_COMP_PARAM_1_TX_BUFFER_DEPTH_INDEX	16
+#define IC_COMP_PARAM_1_TX_BUFFER_DEPTH_WIDTH	8
+#define IC_CON_MASTER_MODE_INDEX		0
+#define IC_CON_MASTER_MODE_WIDTH		1
+#define IC_CON_RESTART_EN_INDEX			5
+#define IC_CON_RESTART_EN_WIDTH			1
+#define IC_CON_RX_FIFO_FULL_HOLD_INDEX		9
+#define IC_CON_RX_FIFO_FULL_HOLD_WIDTH		1
+#define IC_CON_SLAVE_DISABLE_INDEX		6
+#define IC_CON_SLAVE_DISABLE_WIDTH		1
+#define IC_CON_SPEED_INDEX			1
+#define IC_CON_SPEED_WIDTH			2
+#define IC_DATA_CMD_CMD_INDEX			8
+#define IC_DATA_CMD_CMD_WIDTH			1
+#define IC_DATA_CMD_STOP_INDEX			9
+#define IC_DATA_CMD_STOP_WIDTH			1
+#define IC_ENABLE_ABORT_INDEX			1
+#define IC_ENABLE_ABORT_WIDTH			1
+#define IC_ENABLE_EN_INDEX			0
+#define IC_ENABLE_EN_WIDTH			1
+#define IC_ENABLE_STATUS_EN_INDEX		0
+#define IC_ENABLE_STATUS_EN_WIDTH		1
+#define IC_INTR_MASK_TX_EMPTY_INDEX		4
+#define IC_INTR_MASK_TX_EMPTY_WIDTH		1
+#define IC_RAW_INTR_STAT_RX_FULL_INDEX		2
+#define IC_RAW_INTR_STAT_RX_FULL_WIDTH		1
+#define IC_RAW_INTR_STAT_STOP_DET_INDEX		9
+#define IC_RAW_INTR_STAT_STOP_DET_WIDTH		1
+#define IC_RAW_INTR_STAT_TX_ABRT_INDEX		6
+#define IC_RAW_INTR_STAT_TX_ABRT_WIDTH		1
+#define IC_RAW_INTR_STAT_TX_EMPTY_INDEX		4
+#define IC_RAW_INTR_STAT_TX_EMPTY_WIDTH		1
+
+/* I2C Control register value */
+#define IC_TX_ABRT_7B_ADDR_NOACK		0x0001
+#define IC_TX_ABRT_ARB_LOST			0x1000
+
 /* Descriptor/Packet entry bit positions and sizes */
 #define RX_PACKET_ERRORS_CRC_INDEX		2
 #define RX_PACKET_ERRORS_CRC_WIDTH		1
@@ -917,8 +1097,8 @@
 #define RX_PACKET_ATTRIBUTES_CSUM_DONE_WIDTH	1
 #define RX_PACKET_ATTRIBUTES_VLAN_CTAG_INDEX	1
 #define RX_PACKET_ATTRIBUTES_VLAN_CTAG_WIDTH	1
-#define RX_PACKET_ATTRIBUTES_INCOMPLETE_INDEX	2
-#define RX_PACKET_ATTRIBUTES_INCOMPLETE_WIDTH	1
+#define RX_PACKET_ATTRIBUTES_LAST_INDEX		2
+#define RX_PACKET_ATTRIBUTES_LAST_WIDTH		1
 #define RX_PACKET_ATTRIBUTES_CONTEXT_NEXT_INDEX	3
 #define RX_PACKET_ATTRIBUTES_CONTEXT_NEXT_WIDTH	1
 #define RX_PACKET_ATTRIBUTES_CONTEXT_INDEX	4
@@ -927,11 +1107,19 @@
 #define RX_PACKET_ATTRIBUTES_RX_TSTAMP_WIDTH	1
 #define RX_PACKET_ATTRIBUTES_RSS_HASH_INDEX	6
 #define RX_PACKET_ATTRIBUTES_RSS_HASH_WIDTH	1
+#define RX_PACKET_ATTRIBUTES_FIRST_INDEX	7
+#define RX_PACKET_ATTRIBUTES_FIRST_WIDTH	1
+#define RX_PACKET_ATTRIBUTES_TNP_INDEX		8
+#define RX_PACKET_ATTRIBUTES_TNP_WIDTH		1
+#define RX_PACKET_ATTRIBUTES_TNPCSUM_DONE_INDEX	9
+#define RX_PACKET_ATTRIBUTES_TNPCSUM_DONE_WIDTH	1
 
 #define RX_NORMAL_DESC0_OVT_INDEX		0
 #define RX_NORMAL_DESC0_OVT_WIDTH		16
 #define RX_NORMAL_DESC2_HL_INDEX		0
 #define RX_NORMAL_DESC2_HL_WIDTH		10
+#define RX_NORMAL_DESC2_TNP_INDEX		11
+#define RX_NORMAL_DESC2_TNP_WIDTH		1
 #define RX_NORMAL_DESC3_CDA_INDEX		27
 #define RX_NORMAL_DESC3_CDA_WIDTH		1
 #define RX_NORMAL_DESC3_CTXT_INDEX		30
@@ -958,9 +1146,11 @@
 #define RX_DESC3_L34T_IPV4_TCP			1
 #define RX_DESC3_L34T_IPV4_UDP			2
 #define RX_DESC3_L34T_IPV4_ICMP			3
+#define RX_DESC3_L34T_IPV4_UNKNOWN		7
 #define RX_DESC3_L34T_IPV6_TCP			9
 #define RX_DESC3_L34T_IPV6_UDP			10
 #define RX_DESC3_L34T_IPV6_ICMP			11
+#define RX_DESC3_L34T_IPV6_UNKNOWN		15
 
 #define RX_CONTEXT_DESC3_TSA_INDEX		4
 #define RX_CONTEXT_DESC3_TSA_WIDTH		1
@@ -975,6 +1165,8 @@
 #define TX_PACKET_ATTRIBUTES_VLAN_CTAG_WIDTH	1
 #define TX_PACKET_ATTRIBUTES_PTP_INDEX		3
 #define TX_PACKET_ATTRIBUTES_PTP_WIDTH		1
+#define TX_PACKET_ATTRIBUTES_VXLAN_INDEX	4
+#define TX_PACKET_ATTRIBUTES_VXLAN_WIDTH	1
 
 #define TX_CONTEXT_DESC2_MSS_INDEX		0
 #define TX_CONTEXT_DESC2_MSS_WIDTH		15
@@ -1015,8 +1207,11 @@
 #define TX_NORMAL_DESC3_TCPPL_WIDTH		18
 #define TX_NORMAL_DESC3_TSE_INDEX		18
 #define TX_NORMAL_DESC3_TSE_WIDTH		1
+#define TX_NORMAL_DESC3_VNP_INDEX		23
+#define TX_NORMAL_DESC3_VNP_WIDTH		3
 
 #define TX_NORMAL_DESC2_VLAN_INSERT		0x2
+#define TX_NORMAL_DESC3_VXLAN_PACKET		0x3
 
 /* MDIO undefined or vendor specific registers */
 #ifndef MDIO_PMA_10GBR_PMD_CTRL
@@ -1025,6 +1220,34 @@
 
 #ifndef MDIO_PMA_10GBR_FECCTRL
 #define MDIO_PMA_10GBR_FECCTRL		0x00ab
+#endif
+
+#ifndef MDIO_PMA_RX_CTRL1
+#define MDIO_PMA_RX_CTRL1		0x8051
+#endif
+
+#ifndef MDIO_PMA_RX_LSTS
+#define MDIO_PMA_RX_LSTS		0x018020
+#endif
+
+#ifndef MDIO_PMA_RX_EQ_CTRL4
+#define MDIO_PMA_RX_EQ_CTRL4		0x0001805C
+#endif
+
+#ifndef MDIO_PMA_MP_MISC_STS
+#define MDIO_PMA_MP_MISC_STS		0x0078
+#endif
+
+#ifndef MDIO_PMA_PHY_RX_EQ_CEU
+#define MDIO_PMA_PHY_RX_EQ_CEU		0x1800E
+#endif
+
+#ifndef MDIO_PCS_DIG_CTRL
+#define MDIO_PCS_DIG_CTRL		0x8000
+#endif
+
+#ifndef MDIO_PCS_DIGITAL_STAT
+#define MDIO_PCS_DIGITAL_STAT		0x8010
 #endif
 
 #ifndef MDIO_AN_XNP
@@ -1047,11 +1270,58 @@
 #define MDIO_AN_INT			0x8002
 #endif
 
+#ifndef MDIO_VEND2_AN_ADVERTISE
+#define MDIO_VEND2_AN_ADVERTISE		0x0004
+#endif
+
+#ifndef MDIO_VEND2_AN_LP_ABILITY
+#define MDIO_VEND2_AN_LP_ABILITY	0x0005
+#endif
+
+#ifndef MDIO_VEND2_AN_CTRL
+#define MDIO_VEND2_AN_CTRL		0x8001
+#endif
+
+#ifndef MDIO_VEND2_AN_STAT
+#define MDIO_VEND2_AN_STAT		0x8002
+#endif
+
+#ifndef MDIO_VEND2_PMA_CDR_CONTROL
+#define MDIO_VEND2_PMA_CDR_CONTROL	0x8056
+#endif
+
+#ifndef MDIO_VEND2_PMA_MISC_CTRL0
+#define MDIO_VEND2_PMA_MISC_CTRL0	0x8090
+#endif
+
 #ifndef MDIO_CTRL1_SPEED1G
 #define MDIO_CTRL1_SPEED1G		(MDIO_CTRL1_SPEED10G & ~BMCR_SPEED100)
 #endif
 
+#ifndef MDIO_VEND2_CTRL1_AN_ENABLE
+#define MDIO_VEND2_CTRL1_AN_ENABLE	BIT(12)
+#endif
+
+#ifndef MDIO_VEND2_CTRL1_AN_RESTART
+#define MDIO_VEND2_CTRL1_AN_RESTART	BIT(9)
+#endif
+
+#ifndef MDIO_VEND2_CTRL1_SS6
+#define MDIO_VEND2_CTRL1_SS6		BIT(6)
+#endif
+
+#ifndef MDIO_VEND2_CTRL1_SS13
+#define MDIO_VEND2_CTRL1_SS13		BIT(13)
+#endif
+
+#define XGBE_VEND2_MAC_AUTO_SW		BIT(9)
+
 /* MDIO mask values */
+#define XGBE_AN_CL73_INT_CMPLT		BIT(0)
+#define XGBE_AN_CL73_INC_LINK		BIT(1)
+#define XGBE_AN_CL73_PG_RCV		BIT(2)
+#define XGBE_AN_CL73_INT_MASK		0x07
+
 #define XGBE_XNP_MCF_NULL_MESSAGE	0x001
 #define XGBE_XNP_ACK_PROCESSED		BIT(12)
 #define XGBE_XNP_MP_FORMATTED		BIT(13)
@@ -1059,6 +1329,56 @@
 
 #define XGBE_KR_TRAINING_START		BIT(0)
 #define XGBE_KR_TRAINING_ENABLE		BIT(1)
+
+#define XGBE_PCS_CL37_BP		BIT(12)
+#define XGBE_PCS_PSEQ_STATE_MASK	0x1c
+#define XGBE_PCS_PSEQ_STATE_POWER_GOOD	0x10
+
+#define XGBE_AN_CL37_INT_CMPLT		BIT(0)
+#define XGBE_AN_CL37_INT_MASK		0x01
+
+#define XGBE_AN_CL37_HD_MASK		0x40
+#define XGBE_AN_CL37_FD_MASK		0x20
+
+#define XGBE_AN_CL37_PCS_MODE_MASK	0x06
+#define XGBE_AN_CL37_PCS_MODE_BASEX	0x00
+#define XGBE_AN_CL37_PCS_MODE_SGMII	0x04
+#define XGBE_AN_CL37_TX_CONFIG_MASK	0x08
+#define XGBE_AN_CL37_MII_CTRL_8BIT	0x0100
+
+#define XGBE_PMA_CDR_TRACK_EN_MASK	0x01
+#define XGBE_PMA_CDR_TRACK_EN_OFF	0x00
+#define XGBE_PMA_CDR_TRACK_EN_ON	0x01
+
+#define XGBE_PMA_RX_RST_0_MASK		BIT(4)
+#define XGBE_PMA_RX_RST_0_RESET_ON	0x10
+#define XGBE_PMA_RX_RST_0_RESET_OFF	0x00
+
+#define XGBE_PMA_RX_SIG_DET_0_MASK	BIT(4)
+#define XGBE_PMA_RX_SIG_DET_0_ENABLE	BIT(4)
+#define XGBE_PMA_RX_SIG_DET_0_DISABLE	0x0000
+
+#define XGBE_PMA_RX_VALID_0_MASK	BIT(12)
+#define XGBE_PMA_RX_VALID_0_ENABLE	BIT(12)
+#define XGBE_PMA_RX_VALID_0_DISABLE	0x0000
+
+#define XGBE_PMA_RX_AD_REQ_MASK		BIT(12)
+#define XGBE_PMA_RX_AD_REQ_ENABLE	BIT(12)
+#define XGBE_PMA_RX_AD_REQ_DISABLE	0x0000
+
+#define XGBE_PMA_RX_ADPT_ACK_MASK	BIT(12)
+#define XGBE_PMA_RX_ADPT_ACK		BIT(12)
+
+#define XGBE_PMA_CFF_UPDTM1_VLD		BIT(8)
+#define XGBE_PMA_CFF_UPDT0_VLD		BIT(9)
+#define XGBE_PMA_CFF_UPDT1_VLD		BIT(10)
+#define XGBE_PMA_CFF_UPDT_MASK		(XGBE_PMA_CFF_UPDTM1_VLD |\
+					 XGBE_PMA_CFF_UPDT0_VLD | \
+					 XGBE_PMA_CFF_UPDT1_VLD)
+
+#define XGBE_PMA_PLL_CTRL_MASK		BIT(15)
+#define XGBE_PMA_PLL_CTRL_ENABLE	BIT(15)
+#define XGBE_PMA_PLL_CTRL_DISABLE	0x0000
 
 /* Bit setting and getting macros
  *  The get macro will extract the current bit field value from within
@@ -1195,11 +1515,27 @@ do {									\
 /* Macros for building, reading or writing register values or bits
  * within the register values of XPCS registers.
  */
-#define XPCS_IOWRITE(_pdata, _off, _val)				\
+#define XPCS_GET_BITS(_var, _prefix, _field)				\
+	GET_BITS((_var),                                                \
+		 _prefix##_##_field##_INDEX,                            \
+		 _prefix##_##_field##_WIDTH)
+
+#define XPCS_SET_BITS(_var, _prefix, _field, _val)                      \
+	SET_BITS((_var),                                                \
+		 _prefix##_##_field##_INDEX,                            \
+		 _prefix##_##_field##_WIDTH, (_val))
+
+#define XPCS32_IOWRITE(_pdata, _off, _val)				\
 	iowrite32(_val, (_pdata)->xpcs_regs + (_off))
 
-#define XPCS_IOREAD(_pdata, _off)					\
+#define XPCS32_IOREAD(_pdata, _off)					\
 	ioread32((_pdata)->xpcs_regs + (_off))
+
+#define XPCS16_IOWRITE(_pdata, _off, _val)				\
+	iowrite16(_val, (_pdata)->xpcs_regs + (_off))
+
+#define XPCS16_IOREAD(_pdata, _off)					\
+	ioread16((_pdata)->xpcs_regs + (_off))
 
 /* Macros for building, reading or writing register values or bits
  * within the register values of SerDes integration registers.
@@ -1278,20 +1614,87 @@ do {									\
 } while (0)
 
 /* Macros for building, reading or writing register values or bits
- * using MDIO.  Different from above because of the use of standardized
- * Linux include values.  No shifting is performed with the bit
- * operations, everything works on mask values.
+ * within the register values of MAC Control registers.
  */
+#define XP_GET_BITS(_var, _prefix, _field)				\
+	GET_BITS((_var),						\
+		 _prefix##_##_field##_INDEX,				\
+		 _prefix##_##_field##_WIDTH)
+
+#define XP_SET_BITS(_var, _prefix, _field, _val)			\
+	SET_BITS((_var),						\
+		 _prefix##_##_field##_INDEX,				\
+		 _prefix##_##_field##_WIDTH, (_val))
+
+#define XP_IOREAD(_pdata, _reg)						\
+	ioread32((_pdata)->xprop_regs + (_reg))
+
+#define XP_IOREAD_BITS(_pdata, _reg, _field)				\
+	GET_BITS(XP_IOREAD((_pdata), (_reg)),				\
+		 _reg##_##_field##_INDEX,				\
+		 _reg##_##_field##_WIDTH)
+
+#define XP_IOWRITE(_pdata, _reg, _val)					\
+	iowrite32((_val), (_pdata)->xprop_regs + (_reg))
+
+#define XP_IOWRITE_BITS(_pdata, _reg, _field, _val)			\
+do {									\
+	u32 reg_val = XP_IOREAD((_pdata), (_reg));			\
+	SET_BITS(reg_val,						\
+		 _reg##_##_field##_INDEX,				\
+		 _reg##_##_field##_WIDTH, (_val));			\
+	XP_IOWRITE((_pdata), (_reg), reg_val);				\
+} while (0)
+
+/* Macros for building, reading or writing register values or bits
+ * within the register values of I2C Control registers.
+ */
+#define XI2C_GET_BITS(_var, _prefix, _field)				\
+	GET_BITS((_var),						\
+		 _prefix##_##_field##_INDEX,				\
+		 _prefix##_##_field##_WIDTH)
+
+#define XI2C_SET_BITS(_var, _prefix, _field, _val)			\
+	SET_BITS((_var),						\
+		 _prefix##_##_field##_INDEX,				\
+		 _prefix##_##_field##_WIDTH, (_val))
+
+#define XI2C_IOREAD(_pdata, _reg)					\
+	ioread32((_pdata)->xi2c_regs + (_reg))
+
+#define XI2C_IOREAD_BITS(_pdata, _reg, _field)				\
+	GET_BITS(XI2C_IOREAD((_pdata), (_reg)),				\
+		 _reg##_##_field##_INDEX,				\
+		 _reg##_##_field##_WIDTH)
+
+#define XI2C_IOWRITE(_pdata, _reg, _val)				\
+	iowrite32((_val), (_pdata)->xi2c_regs + (_reg))
+
+#define XI2C_IOWRITE_BITS(_pdata, _reg, _field, _val)			\
+do {									\
+	u32 reg_val = XI2C_IOREAD((_pdata), (_reg));			\
+	SET_BITS(reg_val,						\
+		 _reg##_##_field##_INDEX,				\
+		 _reg##_##_field##_WIDTH, (_val));			\
+	XI2C_IOWRITE((_pdata), (_reg), reg_val);			\
+} while (0)
+
+/* Macros for building, reading or writing register values or bits
+ * using MDIO.
+ */
+
+#define XGBE_ADDR_C45 BIT(30)
+
 #define XMDIO_READ(_pdata, _mmd, _reg)					\
 	((_pdata)->hw_if.read_mmd_regs((_pdata), 0,			\
-		MII_ADDR_C45 | (_mmd << 16) | ((_reg) & 0xffff)))
+		XGBE_ADDR_C45 | (_mmd << 16) | ((_reg) & 0xffff)))
 
 #define XMDIO_READ_BITS(_pdata, _mmd, _reg, _mask)			\
 	(XMDIO_READ((_pdata), _mmd, _reg) & _mask)
 
 #define XMDIO_WRITE(_pdata, _mmd, _reg, _val)				\
 	((_pdata)->hw_if.write_mmd_regs((_pdata), 0,			\
-		MII_ADDR_C45 | (_mmd << 16) | ((_reg) & 0xffff), (_val)))
+		XGBE_ADDR_C45 | (_mmd << 16) | ((_reg) & 0xffff), (_val)))
 
 #define XMDIO_WRITE_BITS(_pdata, _mmd, _reg, _mask, _val)		\
 do {									\

@@ -1,14 +1,26 @@
-==================================
-Linux GPU Driver Developer's Guide
-==================================
+============================
+GPU Driver Developer's Guide
+============================
 
 .. toctree::
+   :maxdepth: 2
 
    introduction
    drm-internals
    drm-mm
    drm-kms
    drm-kms-helpers
+   drm-ras
    drm-uapi
-   i915
+   drm-usage-stats
+   driver-uapi
+   drm-client
+   drm-compute
+   drivers
+   backlight
    vga-switcheroo
+   vgaarbiter
+   automated_testing
+   implementation_guidelines
+   todo
+   rfc/index

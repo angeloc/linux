@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMAP3/OMAP4 Voltage Management Routines
  *
@@ -13,10 +14,6 @@
  *
  * Copyright (C) 2010 Texas Instruments, Inc.
  * Thara Gopinath <thara@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/delay.h>
@@ -54,7 +51,7 @@ static LIST_HEAD(voltdm_list);
  */
 unsigned long voltdm_get_voltage(struct voltagedomain *voltdm)
 {
-	if (!voltdm || IS_ERR(voltdm)) {
+	if (IS_ERR_OR_NULL(voltdm)) {
 		pr_warn("%s: VDD specified does not exist!\n", __func__);
 		return 0;
 	}
@@ -70,19 +67,25 @@ unsigned long voltdm_get_voltage(struct voltagedomain *voltdm)
  * This API should be called by the kernel to do the voltage scaling
  * for a particular voltage domain during DVFS.
  */
-int voltdm_scale(struct voltagedomain *voltdm,
+static int voltdm_scale(struct voltagedomain *voltdm,
 		 unsigned long target_volt)
 {
 	int ret, i;
 	unsigned long volt = 0;
 
-	if (!voltdm || IS_ERR(voltdm)) {
+	if (IS_ERR_OR_NULL(voltdm)) {
 		pr_warn("%s: VDD specified does not exist!\n", __func__);
 		return -EINVAL;
 	}
 
 	if (!voltdm->scale) {
 		pr_err("%s: No voltage scale API registered for vdd_%s\n",
+			__func__, voltdm->name);
+		return -ENODATA;
+	}
+
+	if (!voltdm->volt_data) {
+		pr_err("%s: No voltage data defined for vdd_%s\n",
 			__func__, voltdm->name);
 		return -ENODATA;
 	}
@@ -121,7 +124,7 @@ void voltdm_reset(struct voltagedomain *voltdm)
 {
 	unsigned long target_volt;
 
-	if (!voltdm || IS_ERR(voltdm)) {
+	if (IS_ERR_OR_NULL(voltdm)) {
 		pr_warn("%s: VDD specified does not exist!\n", __func__);
 		return;
 	}
@@ -151,7 +154,7 @@ void voltdm_reset(struct voltagedomain *voltdm)
 void omap_voltage_get_volttable(struct voltagedomain *voltdm,
 				struct omap_volt_data **volt_data)
 {
-	if (!voltdm || IS_ERR(voltdm)) {
+	if (IS_ERR_OR_NULL(voltdm)) {
 		pr_warn("%s: VDD specified does not exist!\n", __func__);
 		return;
 	}
@@ -179,7 +182,7 @@ struct omap_volt_data *omap_voltage_get_voltdata(struct voltagedomain *voltdm,
 {
 	int i;
 
-	if (!voltdm || IS_ERR(voltdm)) {
+	if (IS_ERR_OR_NULL(voltdm)) {
 		pr_warn("%s: VDD specified does not exist!\n", __func__);
 		return ERR_PTR(-EINVAL);
 	}
@@ -213,7 +216,7 @@ struct omap_volt_data *omap_voltage_get_voltdata(struct voltagedomain *voltdm,
 int omap_voltage_register_pmic(struct voltagedomain *voltdm,
 			       struct omap_voltdm_pmic *pmic)
 {
-	if (!voltdm || IS_ERR(voltdm)) {
+	if (IS_ERR_OR_NULL(voltdm)) {
 		pr_warn("%s: VDD specified does not exist!\n", __func__);
 		return -EINVAL;
 	}

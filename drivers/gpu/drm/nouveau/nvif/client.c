@@ -26,16 +26,13 @@
 #include <nvif/driver.h>
 #include <nvif/ioctl.h>
 
-int
-nvif_client_ioctl(struct nvif_client *client, void *data, u32 size)
-{
-	return client->driver->ioctl(client->object.priv, client->super, data, size, NULL);
-}
+#include <nvif/class.h>
+#include <nvif/if0000.h>
 
 int
-nvif_client_suspend(struct nvif_client *client)
+nvif_client_suspend(struct nvif_client *client, bool runtime)
 {
-	return client->driver->suspend(client->object.priv);
+	return client->driver->suspend(client->object.priv, runtime);
 }
 
 int
@@ -45,62 +42,28 @@ nvif_client_resume(struct nvif_client *client)
 }
 
 void
-nvif_client_fini(struct nvif_client *client)
+nvif_client_dtor(struct nvif_client *client)
 {
-	if (client->driver) {
-		client->driver->fini(client->object.priv);
-		client->driver = NULL;
-		client->object.client = NULL;
-		nvif_object_fini(&client->object);
-	}
+	nvif_object_dtor(&client->object);
+	client->driver = NULL;
 }
 
-const struct nvif_driver *
-nvif_drivers[] = {
-#ifdef __KERNEL__
-	&nvif_driver_nvkm,
-#else
-	&nvif_driver_drm,
-	&nvif_driver_lib,
-	&nvif_driver_null,
-#endif
-	NULL
-};
-
 int
-nvif_client_init(const char *driver, const char *name, u64 device,
-		 const char *cfg, const char *dbg, struct nvif_client *client)
+nvif_client_ctor(struct nvif_client *parent, const char *name, struct nvif_client *client)
 {
-	struct {
-		struct nvif_ioctl_v0 ioctl;
-		struct nvif_ioctl_nop_v0 nop;
-	} args = {};
-	int ret, i;
+	struct nvif_client_v0 args = {};
+	int ret;
 
-	ret = nvif_object_init(NULL, 0, 0, NULL, 0, &client->object);
+	strscpy_pad(args.name, name, sizeof(args.name));
+	ret = nvif_object_ctor(parent != client ? &parent->object : NULL,
+			       name ? name : "nvifClient", 0,
+			       NVIF_CLASS_CLIENT, &args, sizeof(args),
+			       &client->object);
 	if (ret)
 		return ret;
 
 	client->object.client = client;
 	client->object.handle = ~0;
-	client->route = NVIF_IOCTL_V0_ROUTE_NVIF;
-	client->super = true;
-
-	for (i = 0, ret = -EINVAL; (client->driver = nvif_drivers[i]); i++) {
-		if (!driver || !strcmp(client->driver->name, driver)) {
-			ret = client->driver->init(name, device, cfg, dbg,
-						  &client->object.priv);
-			if (!ret || driver)
-				break;
-		}
-	}
-
-	if (ret == 0) {
-		ret = nvif_client_ioctl(client, &args, sizeof(args));
-		client->version = args.nop.version;
-	}
-
-	if (ret)
-		nvif_client_fini(client);
-	return ret;
+	client->driver = parent->driver;
+	return 0;
 }

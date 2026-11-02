@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Marvell Wireless LAN device driver: 802.11h
+ * NXP Wireless LAN device driver: 802.11h
  *
- * Copyright (C) 2013-2014, Marvell International Ltd.
- *
- * This software file (the "File") is distributed by Marvell International
- * Ltd. under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available by writing to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
- * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
+ * Copyright 2011-2020 NXP
  */
 
 #include "main.h"
@@ -128,16 +116,13 @@ void mwifiex_dfs_cac_work_queue(struct work_struct *work)
 			container_of(delayed_work, struct mwifiex_private,
 				     dfs_cac_work);
 
-	if (WARN_ON(!priv))
-		return;
-
 	chandef = priv->dfs_chandef;
-	if (priv->wdev.cac_started) {
+	if (priv->wdev.links[0].cac_started) {
 		mwifiex_dbg(priv->adapter, MSG,
 			    "CAC timer finished; No radar detected\n");
 		cfg80211_cac_event(priv->netdev, &chandef,
 				   NL80211_RADAR_CAC_FINISHED,
-				   GFP_KERNEL);
+				   GFP_KERNEL, 0);
 	}
 }
 
@@ -153,7 +138,8 @@ int mwifiex_cmd_issue_chan_report_request(struct mwifiex_private *priv,
 
 	cmd->command = cpu_to_le16(HostCmd_CMD_CHAN_REPORT_REQUEST);
 	cmd->size = cpu_to_le16(S_DS_GEN);
-	le16_add_cpu(&cmd->size, sizeof(struct host_cmd_ds_chan_rpt_req));
+	le16_unaligned_add_cpu(&cmd->size,
+			       sizeof(struct host_cmd_ds_chan_rpt_req));
 
 	cr_req->chan_desc.start_freq = cpu_to_le16(MWIFIEX_A_BAND_START_FREQ);
 	cr_req->chan_desc.chan_num = radar_params->chandef->chan->hw_value;
@@ -188,7 +174,7 @@ int mwifiex_stop_radar_detection(struct mwifiex_private *priv,
  */
 void mwifiex_abort_cac(struct mwifiex_private *priv)
 {
-	if (priv->wdev.cac_started) {
+	if (priv->wdev.links[0].cac_started) {
 		if (mwifiex_stop_radar_detection(priv, &priv->dfs_chandef))
 			mwifiex_dbg(priv->adapter, ERROR,
 				    "failed to stop CAC in FW\n");
@@ -196,7 +182,8 @@ void mwifiex_abort_cac(struct mwifiex_private *priv)
 			    "Aborting delayed work for CAC.\n");
 		cancel_delayed_work_sync(&priv->dfs_cac_work);
 		cfg80211_cac_event(priv->netdev, &priv->dfs_chandef,
-				   NL80211_RADAR_CAC_ABORTED, GFP_KERNEL);
+				   NL80211_RADAR_CAC_ABORTED, GFP_KERNEL,
+				   0);
 	}
 }
 
@@ -209,7 +196,6 @@ int mwifiex_11h_handle_chanrpt_ready(struct mwifiex_private *priv,
 {
 	struct host_cmd_ds_chan_rpt_event *rpt_event;
 	struct mwifiex_ie_types_chan_rpt_data *rpt;
-	u8 *evt_buf;
 	u16 event_len, tlv_len;
 
 	rpt_event = (void *)(skb->data + sizeof(u32));
@@ -221,8 +207,6 @@ int mwifiex_11h_handle_chanrpt_ready(struct mwifiex_private *priv,
 			    "Error in channel report event\n");
 		return -1;
 	}
-
-	evt_buf = (void *)&rpt_event->tlvbuf;
 
 	while (event_len >= sizeof(struct mwifiex_ie_types_header)) {
 		rpt = (void *)&rpt_event->tlvbuf;
@@ -238,14 +222,13 @@ int mwifiex_11h_handle_chanrpt_ready(struct mwifiex_private *priv,
 				cfg80211_cac_event(priv->netdev,
 						   &priv->dfs_chandef,
 						   NL80211_RADAR_DETECTED,
-						   GFP_KERNEL);
+						   GFP_KERNEL, 0);
 			}
 			break;
 		default:
 			break;
 		}
 
-		evt_buf += (tlv_len + sizeof(rpt->header));
 		event_len -= (tlv_len + sizeof(rpt->header));
 	}
 
@@ -260,22 +243,17 @@ int mwifiex_11h_handle_radar_detected(struct mwifiex_private *priv,
 
 	rdr_event = (void *)(skb->data + sizeof(u32));
 
-	if (le32_to_cpu(rdr_event->passed)) {
-		mwifiex_dbg(priv->adapter, MSG,
-			    "radar detected; indicating kernel\n");
-		if (mwifiex_stop_radar_detection(priv, &priv->dfs_chandef))
-			mwifiex_dbg(priv->adapter, ERROR,
-				    "Failed to stop CAC in FW\n");
-		cfg80211_radar_event(priv->adapter->wiphy, &priv->dfs_chandef,
-				     GFP_KERNEL);
-		mwifiex_dbg(priv->adapter, MSG, "regdomain: %d\n",
-			    rdr_event->reg_domain);
-		mwifiex_dbg(priv->adapter, MSG, "radar detection type: %d\n",
-			    rdr_event->det_type);
-	} else {
-		mwifiex_dbg(priv->adapter, MSG,
-			    "false radar detection event!\n");
-	}
+	mwifiex_dbg(priv->adapter, MSG,
+		    "radar detected; indicating kernel\n");
+	if (mwifiex_stop_radar_detection(priv, &priv->dfs_chandef))
+		mwifiex_dbg(priv->adapter, ERROR,
+			    "Failed to stop CAC in FW\n");
+	cfg80211_radar_event(priv->adapter->wiphy, &priv->dfs_chandef,
+			     GFP_KERNEL);
+	mwifiex_dbg(priv->adapter, MSG, "regdomain: %d\n",
+		    rdr_event->reg_domain);
+	mwifiex_dbg(priv->adapter, MSG, "radar detection type: %d\n",
+		    rdr_event->det_type);
 
 	return 0;
 }
@@ -292,9 +270,6 @@ void mwifiex_dfs_chan_sw_work_queue(struct work_struct *work)
 	struct mwifiex_private *priv =
 			container_of(delayed_work, struct mwifiex_private,
 				     dfs_chan_sw_work);
-
-	if (WARN_ON(!priv))
-		return;
 
 	bss_cfg = &priv->bss_cfg;
 	if (!bss_cfg->beacon_period) {
@@ -313,5 +288,7 @@ void mwifiex_dfs_chan_sw_work_queue(struct work_struct *work)
 
 	mwifiex_dbg(priv->adapter, MSG,
 		    "indicating channel switch completion to kernel\n");
-	cfg80211_ch_switch_notify(priv->netdev, &priv->dfs_chandef);
+	wiphy_lock(priv->wdev.wiphy);
+	cfg80211_ch_switch_notify(priv->netdev, &priv->dfs_chandef, 0);
+	wiphy_unlock(priv->wdev.wiphy);
 }

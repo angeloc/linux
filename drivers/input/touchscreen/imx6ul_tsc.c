@@ -1,16 +1,13 @@
-/*
- * Freescale i.MX6UL touchscreen controller driver
- *
- * Copyright (C) 2015 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+// SPDX-License-Identifier: GPL-2.0
+//
+// Freescale i.MX6UL touchscreen controller driver
+//
+// Copyright (C) 2015 Freescale Semiconductor, Inc.
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/bitfield.h>
 #include <linux/gpio/consumer.h>
 #include <linux/input.h>
 #include <linux/slab.h>
@@ -21,20 +18,26 @@
 #include <linux/platform_device.h>
 #include <linux/clk.h>
 #include <linux/io.h>
+#include <linux/log2.h>
 
 /* ADC configuration registers field define */
-#define ADC_AIEN		(0x1 << 7)
+#define ADC_AIEN		BIT(7)
+#define ADC_ADCH_MASK		GENMASK(4, 0)
 #define ADC_CONV_DISABLE	0x1F
-#define ADC_CAL			(0x1 << 7)
-#define ADC_CALF		0x2
-#define ADC_12BIT_MODE		(0x2 << 2)
+#define ADC_AVGE		BIT(5)
+#define ADC_CAL			BIT(7)
+#define ADC_CALF		BIT(1)
+#define ADC_CONV_MODE_MASK	GENMASK(3, 2)
+#define ADC_12BIT_MODE		0x2
 #define ADC_IPG_CLK		0x00
-#define ADC_CLK_DIV_8		(0x03 << 5)
-#define ADC_SHORT_SAMPLE_MODE	(0x0 << 4)
-#define ADC_HARDWARE_TRIGGER	(0x1 << 13)
+#define ADC_INPUT_CLK_MASK	GENMASK(1, 0)
+#define ADC_CLK_DIV_8		0x03
+#define ADC_CLK_DIV_MASK	GENMASK(6, 5)
+#define ADC_SAMPLE_MODE		BIT(4)
+#define ADC_HARDWARE_TRIGGER	BIT(13)
+#define ADC_AVGS_MASK		GENMASK(15, 14)
 #define SELECT_CHANNEL_4	0x04
 #define SELECT_CHANNEL_1	0x01
-#define DISABLE_CONVERSION_INT	(0x0 << 7)
 
 /* ADC registers */
 #define REG_ADC_HC0		0x00
@@ -51,7 +54,7 @@
 #define ADC_TIMEOUT		msecs_to_jiffies(100)
 
 /* TSC registers */
-#define REG_TSC_BASIC_SETING	0x00
+#define REG_TSC_BASIC_SETTING	0x00
 #define REG_TSC_PRE_CHARGE_TIME	0x10
 #define REG_TSC_FLOW_CONTROL	0x20
 #define REG_TSC_MEASURE_VALUE	0x30
@@ -61,19 +64,26 @@
 #define REG_TSC_DEBUG_MODE	0x70
 #define REG_TSC_DEBUG_MODE2	0x80
 
+/* TSC_MEASURE_VALUE register field define */
+#define X_VALUE_MASK		GENMASK(27, 16)
+#define Y_VALUE_MASK		GENMASK(11, 0)
+
 /* TSC configuration registers field define */
-#define DETECT_4_WIRE_MODE	(0x0 << 4)
-#define AUTO_MEASURE		0x1
-#define MEASURE_SIGNAL		0x1
-#define DETECT_SIGNAL		(0x1 << 4)
-#define VALID_SIGNAL		(0x1 << 8)
-#define MEASURE_INT_EN		0x1
-#define MEASURE_SIG_EN		0x1
-#define VALID_SIG_EN		(0x1 << 8)
-#define DE_GLITCH_2		(0x2 << 29)
-#define START_SENSE		(0x1 << 12)
-#define TSC_DISABLE		(0x1 << 16)
+#define MEASURE_DELAY_TIME_MASK	GENMASK(31, 8)
+#define DETECT_5_WIRE_MODE	BIT(4)
+#define AUTO_MEASURE		BIT(0)
+#define MEASURE_SIGNAL		BIT(0)
+#define DETECT_SIGNAL		BIT(4)
+#define VALID_SIGNAL		BIT(8)
+#define MEASURE_INT_EN		BIT(0)
+#define MEASURE_SIG_EN		BIT(0)
+#define VALID_SIG_EN		BIT(8)
+#define DE_GLITCH_MASK		GENMASK(30, 29)
+#define DE_GLITCH_DEF		0x02
+#define START_SENSE		BIT(12)
+#define TSC_DISABLE		BIT(16)
 #define DETECT_MODE		0x2
+#define STATE_MACHINE_MASK	GENMASK(22, 20)
 
 struct imx6ul_tsc {
 	struct device *dev;
@@ -84,8 +94,11 @@ struct imx6ul_tsc {
 	struct clk *adc_clk;
 	struct gpio_desc *xnur_gpio;
 
-	int measure_delay_time;
-	int pre_charge_time;
+	u32 measure_delay_time;
+	u32 pre_charge_time;
+	bool average_enable;
+	u32 average_select;
+	u32 de_glitch;
 
 	struct completion completion;
 };
@@ -96,28 +109,37 @@ struct imx6ul_tsc {
  */
 static int imx6ul_adc_init(struct imx6ul_tsc *tsc)
 {
-	int adc_hc = 0;
-	int adc_gc;
-	int adc_gs;
-	int adc_cfg;
-	int timeout;
+	u32 adc_hc = 0;
+	u32 adc_gc;
+	u32 adc_gs;
+	u32 adc_cfg;
+	unsigned long timeout;
 
 	reinit_completion(&tsc->completion);
 
 	adc_cfg = readl(tsc->adc_regs + REG_ADC_CFG);
-	adc_cfg |= ADC_12BIT_MODE | ADC_IPG_CLK;
-	adc_cfg |= ADC_CLK_DIV_8 | ADC_SHORT_SAMPLE_MODE;
+	adc_cfg &= ~(ADC_CONV_MODE_MASK | ADC_INPUT_CLK_MASK);
+	adc_cfg |= FIELD_PREP(ADC_CONV_MODE_MASK, ADC_12BIT_MODE) |
+		FIELD_PREP(ADC_INPUT_CLK_MASK, ADC_IPG_CLK);
+	adc_cfg &= ~(ADC_CLK_DIV_MASK | ADC_SAMPLE_MODE);
+	adc_cfg |= FIELD_PREP(ADC_CLK_DIV_MASK, ADC_CLK_DIV_8);
+	if (tsc->average_enable) {
+		adc_cfg &= ~ADC_AVGS_MASK;
+		adc_cfg |= FIELD_PREP(ADC_AVGS_MASK, tsc->average_select);
+	}
 	adc_cfg &= ~ADC_HARDWARE_TRIGGER;
 	writel(adc_cfg, tsc->adc_regs + REG_ADC_CFG);
 
 	/* enable calibration interrupt */
 	adc_hc |= ADC_AIEN;
-	adc_hc |= ADC_CONV_DISABLE;
+	adc_hc |= FIELD_PREP(ADC_ADCH_MASK, ADC_CONV_DISABLE);
 	writel(adc_hc, tsc->adc_regs + REG_ADC_HC0);
 
 	/* start ADC calibration */
 	adc_gc = readl(tsc->adc_regs + REG_ADC_GC);
 	adc_gc |= ADC_CAL;
+	if (tsc->average_enable)
+		adc_gc |= ADC_AVGE;
 	writel(adc_gc, tsc->adc_regs + REG_ADC_GC);
 
 	timeout = wait_for_completion_timeout
@@ -148,21 +170,23 @@ static int imx6ul_adc_init(struct imx6ul_tsc *tsc)
  */
 static void imx6ul_tsc_channel_config(struct imx6ul_tsc *tsc)
 {
-	int adc_hc0, adc_hc1, adc_hc2, adc_hc3, adc_hc4;
+	u32 adc_hc0, adc_hc1, adc_hc2, adc_hc3, adc_hc4;
 
-	adc_hc0 = DISABLE_CONVERSION_INT;
+	adc_hc0 = FIELD_PREP(ADC_AIEN, 0);
 	writel(adc_hc0, tsc->adc_regs + REG_ADC_HC0);
 
-	adc_hc1 = DISABLE_CONVERSION_INT | SELECT_CHANNEL_4;
+	adc_hc1 = FIELD_PREP(ADC_AIEN, 0) |
+		FIELD_PREP(ADC_ADCH_MASK, SELECT_CHANNEL_4);
 	writel(adc_hc1, tsc->adc_regs + REG_ADC_HC1);
 
-	adc_hc2 = DISABLE_CONVERSION_INT;
+	adc_hc2 = FIELD_PREP(ADC_AIEN, 0);
 	writel(adc_hc2, tsc->adc_regs + REG_ADC_HC2);
 
-	adc_hc3 = DISABLE_CONVERSION_INT | SELECT_CHANNEL_1;
+	adc_hc3 = FIELD_PREP(ADC_AIEN, 0) |
+		FIELD_PREP(ADC_ADCH_MASK, SELECT_CHANNEL_1);
 	writel(adc_hc3, tsc->adc_regs + REG_ADC_HC3);
 
-	adc_hc4 = DISABLE_CONVERSION_INT;
+	adc_hc4 = FIELD_PREP(ADC_AIEN, 0);
 	writel(adc_hc4, tsc->adc_regs + REG_ADC_HC4);
 }
 
@@ -173,14 +197,17 @@ static void imx6ul_tsc_channel_config(struct imx6ul_tsc *tsc)
  */
 static void imx6ul_tsc_set(struct imx6ul_tsc *tsc)
 {
-	int basic_setting = 0;
-	int start;
+	u32 basic_setting = 0;
+	u32 debug_mode2;
+	u32 start;
 
-	basic_setting |= tsc->measure_delay_time << 8;
-	basic_setting |= DETECT_4_WIRE_MODE | AUTO_MEASURE;
-	writel(basic_setting, tsc->tsc_regs + REG_TSC_BASIC_SETING);
+	basic_setting |= FIELD_PREP(MEASURE_DELAY_TIME_MASK,
+				    tsc->measure_delay_time);
+	basic_setting |= AUTO_MEASURE;
+	writel(basic_setting, tsc->tsc_regs + REG_TSC_BASIC_SETTING);
 
-	writel(DE_GLITCH_2, tsc->tsc_regs + REG_TSC_DEBUG_MODE2);
+	debug_mode2 = FIELD_PREP(DE_GLITCH_MASK, tsc->de_glitch);
+	writel(debug_mode2, tsc->tsc_regs + REG_TSC_DEBUG_MODE2);
 
 	writel(tsc->pre_charge_time, tsc->tsc_regs + REG_TSC_PRE_CHARGE_TIME);
 	writel(MEASURE_INT_EN, tsc->tsc_regs + REG_TSC_INT_EN);
@@ -209,8 +236,8 @@ static int imx6ul_tsc_init(struct imx6ul_tsc *tsc)
 
 static void imx6ul_tsc_disable(struct imx6ul_tsc *tsc)
 {
-	int tsc_flow;
-	int adc_cfg;
+	u32 tsc_flow;
+	u32 adc_cfg;
 
 	/* TSC controller enters to idle status */
 	tsc_flow = readl(tsc->tsc_regs + REG_TSC_FLOW_CONTROL);
@@ -227,8 +254,8 @@ static void imx6ul_tsc_disable(struct imx6ul_tsc *tsc)
 static bool tsc_wait_detect_mode(struct imx6ul_tsc *tsc)
 {
 	unsigned long timeout = jiffies + msecs_to_jiffies(2);
-	int state_machine;
-	int debug_mode2;
+	u32 state_machine;
+	u32 debug_mode2;
 
 	do {
 		if (time_after(jiffies, timeout))
@@ -236,7 +263,7 @@ static bool tsc_wait_detect_mode(struct imx6ul_tsc *tsc)
 
 		usleep_range(200, 400);
 		debug_mode2 = readl(tsc->tsc_regs + REG_TSC_DEBUG_MODE2);
-		state_machine = (debug_mode2 >> 20) & 0x7;
+		state_machine = FIELD_GET(STATE_MACHINE_MASK, debug_mode2);
 	} while (state_machine != DETECT_MODE);
 
 	usleep_range(200, 400);
@@ -246,10 +273,10 @@ static bool tsc_wait_detect_mode(struct imx6ul_tsc *tsc)
 static irqreturn_t tsc_irq_fn(int irq, void *dev_id)
 {
 	struct imx6ul_tsc *tsc = dev_id;
-	int status;
-	int value;
-	int x, y;
-	int start;
+	u32 status;
+	u32 value;
+	u32 x, y;
+	u32 start;
 
 	status = readl(tsc->tsc_regs + REG_TSC_INT_STATUS);
 
@@ -264,8 +291,8 @@ static irqreturn_t tsc_irq_fn(int irq, void *dev_id)
 
 	if (status & MEASURE_SIGNAL) {
 		value = readl(tsc->tsc_regs + REG_TSC_MEASURE_VALUE);
-		x = (value >> 16) & 0x0fff;
-		y = value & 0x0fff;
+		x = FIELD_GET(X_VALUE_MASK, value);
+		y = FIELD_GET(Y_VALUE_MASK, value);
 
 		/*
 		 * In detect mode, we can get the xnur gpio value,
@@ -289,21 +316,19 @@ static irqreturn_t tsc_irq_fn(int irq, void *dev_id)
 static irqreturn_t adc_irq_fn(int irq, void *dev_id)
 {
 	struct imx6ul_tsc *tsc = dev_id;
-	int coco;
-	int value;
+	u32 coco;
 
 	coco = readl(tsc->adc_regs + REG_ADC_HS);
 	if (coco & 0x01) {
-		value = readl(tsc->adc_regs + REG_ADC_R0);
+		readl(tsc->adc_regs + REG_ADC_R0);
 		complete(&tsc->completion);
 	}
 
 	return IRQ_HANDLED;
 }
 
-static int imx6ul_tsc_open(struct input_dev *input_dev)
+static int imx6ul_tsc_start(struct imx6ul_tsc *tsc)
 {
-	struct imx6ul_tsc *tsc = input_get_drvdata(input_dev);
 	int err;
 
 	err = clk_prepare_enable(tsc->adc_clk);
@@ -319,21 +344,43 @@ static int imx6ul_tsc_open(struct input_dev *input_dev)
 		dev_err(tsc->dev,
 			"Could not prepare or enable the tsc clock: %d\n",
 			err);
-		clk_disable_unprepare(tsc->adc_clk);
-		return err;
+		goto disable_adc_clk;
 	}
 
-	return imx6ul_tsc_init(tsc);
+	err = imx6ul_tsc_init(tsc);
+	if (err)
+		goto disable_tsc_clk;
+
+	return 0;
+
+disable_tsc_clk:
+	clk_disable_unprepare(tsc->tsc_clk);
+disable_adc_clk:
+	clk_disable_unprepare(tsc->adc_clk);
+	return err;
+}
+
+static void imx6ul_tsc_stop(struct imx6ul_tsc *tsc)
+{
+	imx6ul_tsc_disable(tsc);
+
+	clk_disable_unprepare(tsc->tsc_clk);
+	clk_disable_unprepare(tsc->adc_clk);
+}
+
+
+static int imx6ul_tsc_open(struct input_dev *input_dev)
+{
+	struct imx6ul_tsc *tsc = input_get_drvdata(input_dev);
+
+	return imx6ul_tsc_start(tsc);
 }
 
 static void imx6ul_tsc_close(struct input_dev *input_dev)
 {
 	struct imx6ul_tsc *tsc = input_get_drvdata(input_dev);
 
-	imx6ul_tsc_disable(tsc);
-
-	clk_disable_unprepare(tsc->tsc_clk);
-	clk_disable_unprepare(tsc->adc_clk);
+	imx6ul_tsc_stop(tsc);
 }
 
 static int imx6ul_tsc_probe(struct platform_device *pdev)
@@ -341,11 +388,11 @@ static int imx6ul_tsc_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	struct imx6ul_tsc *tsc;
 	struct input_dev *input_dev;
-	struct resource *tsc_mem;
-	struct resource *adc_mem;
 	int err;
 	int tsc_irq;
 	int adc_irq;
+	u32 average_samples;
+	u32 de_glitch;
 
 	tsc = devm_kzalloc(&pdev->dev, sizeof(*tsc), GFP_KERNEL);
 	if (!tsc)
@@ -379,16 +426,14 @@ static int imx6ul_tsc_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	tsc_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	tsc->tsc_regs = devm_ioremap_resource(&pdev->dev, tsc_mem);
+	tsc->tsc_regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(tsc->tsc_regs)) {
 		err = PTR_ERR(tsc->tsc_regs);
 		dev_err(&pdev->dev, "failed to remap tsc memory: %d\n", err);
 		return err;
 	}
 
-	adc_mem = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	tsc->adc_regs = devm_ioremap_resource(&pdev->dev, adc_mem);
+	tsc->adc_regs = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(tsc->adc_regs)) {
 		err = PTR_ERR(tsc->adc_regs);
 		dev_err(&pdev->dev, "failed to remap adc memory: %d\n", err);
@@ -410,16 +455,12 @@ static int imx6ul_tsc_probe(struct platform_device *pdev)
 	}
 
 	tsc_irq = platform_get_irq(pdev, 0);
-	if (tsc_irq < 0) {
-		dev_err(&pdev->dev, "no tsc irq resource?\n");
+	if (tsc_irq < 0)
 		return tsc_irq;
-	}
 
 	adc_irq = platform_get_irq(pdev, 1);
-	if (adc_irq < 0) {
-		dev_err(&pdev->dev, "no adc irq resource?\n");
+	if (adc_irq < 0)
 		return adc_irq;
-	}
 
 	err = devm_request_threaded_irq(tsc->dev, tsc_irq,
 					NULL, tsc_irq_fn, IRQF_ONESHOT,
@@ -450,6 +491,49 @@ static int imx6ul_tsc_probe(struct platform_device *pdev)
 	if (err)
 		tsc->pre_charge_time = 0xfff;
 
+	err = of_property_read_u32(np, "touchscreen-average-samples",
+				   &average_samples);
+	if (err)
+		average_samples = 1;
+
+	switch (average_samples) {
+	case 1:
+		tsc->average_enable = false;
+		tsc->average_select = 0; /* value unused; initialize anyway */
+		break;
+	case 4:
+	case 8:
+	case 16:
+	case 32:
+		tsc->average_enable = true;
+		tsc->average_select = ilog2(average_samples) - 2;
+		break;
+	default:
+		dev_err(&pdev->dev,
+			"touchscreen-average-samples (%u) must be 1, 4, 8, 16 or 32\n",
+			average_samples);
+		return -EINVAL;
+	}
+
+	err = of_property_read_u32(np, "debounce-delay-us", &de_glitch);
+	if (err) {
+		tsc->de_glitch = DE_GLITCH_DEF;
+	} else {
+		u64 cycles;
+		unsigned long rate = clk_get_rate(tsc->tsc_clk);
+
+		cycles = DIV64_U64_ROUND_UP((u64)de_glitch * rate, USEC_PER_SEC);
+
+		if (cycles <= 0x3ff)
+			tsc->de_glitch = 3;
+		else if (cycles <= 0x7ff)
+			tsc->de_glitch = 2;
+		else if (cycles <= 0xfff)
+			tsc->de_glitch = 1;
+		else
+			tsc->de_glitch = 0;
+	}
+
 	err = input_register_device(tsc->input);
 	if (err) {
 		dev_err(&pdev->dev,
@@ -461,56 +545,40 @@ static int imx6ul_tsc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __maybe_unused imx6ul_tsc_suspend(struct device *dev)
+static int imx6ul_tsc_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct imx6ul_tsc *tsc = platform_get_drvdata(pdev);
 	struct input_dev *input_dev = tsc->input;
 
-	mutex_lock(&input_dev->mutex);
+	guard(mutex)(&input_dev->mutex);
 
-	if (input_dev->users) {
-		imx6ul_tsc_disable(tsc);
-
-		clk_disable_unprepare(tsc->tsc_clk);
-		clk_disable_unprepare(tsc->adc_clk);
-	}
-
-	mutex_unlock(&input_dev->mutex);
+	if (input_device_enabled(input_dev))
+		imx6ul_tsc_stop(tsc);
 
 	return 0;
 }
 
-static int __maybe_unused imx6ul_tsc_resume(struct device *dev)
+static int imx6ul_tsc_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct imx6ul_tsc *tsc = platform_get_drvdata(pdev);
 	struct input_dev *input_dev = tsc->input;
-	int retval = 0;
+	int error;
 
-	mutex_lock(&input_dev->mutex);
+	guard(mutex)(&input_dev->mutex);
 
-	if (input_dev->users) {
-		retval = clk_prepare_enable(tsc->adc_clk);
-		if (retval)
-			goto out;
-
-		retval = clk_prepare_enable(tsc->tsc_clk);
-		if (retval) {
-			clk_disable_unprepare(tsc->adc_clk);
-			goto out;
-		}
-
-		retval = imx6ul_tsc_init(tsc);
+	if (input_device_enabled(input_dev)) {
+		error = imx6ul_tsc_start(tsc);
+		if (error)
+			return error;
 	}
 
-out:
-	mutex_unlock(&input_dev->mutex);
-	return retval;
+	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(imx6ul_tsc_pm_ops,
-			 imx6ul_tsc_suspend, imx6ul_tsc_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(imx6ul_tsc_pm_ops,
+				imx6ul_tsc_suspend, imx6ul_tsc_resume);
 
 static const struct of_device_id imx6ul_tsc_match[] = {
 	{ .compatible = "fsl,imx6ul-tsc", },
@@ -522,7 +590,7 @@ static struct platform_driver imx6ul_tsc_driver = {
 	.driver		= {
 		.name	= "imx6ul-tsc",
 		.of_match_table	= imx6ul_tsc_match,
-		.pm	= &imx6ul_tsc_pm_ops,
+		.pm	= pm_sleep_ptr(&imx6ul_tsc_pm_ops),
 	},
 	.probe		= imx6ul_tsc_probe,
 };

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *    SCLP OCF communication parameters sysfs interface
  *
@@ -5,9 +6,9 @@
  *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>
  */
 
-#define KMSG_COMPONENT "sclp_ocf"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "sclp_ocf: " fmt
 
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/stat.h>
@@ -100,7 +101,7 @@ static ssize_t cpc_name_show(struct kobject *kobj,
 	sclp_ocf_cpc_name_copy(name);
 	name[OCF_LENGTH_CPC_NAME] = 0;
 	EBCASC(name, OCF_LENGTH_CPC_NAME);
-	return snprintf(page, PAGE_SIZE, "%s\n", name);
+	return sysfs_emit(page, "%s\n", name);
 }
 
 static struct kobj_attribute cpc_name_attr =
@@ -112,7 +113,7 @@ static ssize_t hmc_network_show(struct kobject *kobj,
 	int rc;
 
 	spin_lock_irq(&sclp_ocf_lock);
-	rc = snprintf(page, PAGE_SIZE, "%s\n", hmc_network);
+	rc = sysfs_emit(page, "%s\n", hmc_network);
 	spin_unlock_irq(&sclp_ocf_lock);
 	return rc;
 }
@@ -126,7 +127,7 @@ static struct attribute *ocf_attrs[] = {
 	NULL,
 };
 
-static struct attribute_group ocf_attr_group = {
+static const struct attribute_group ocf_attr_group = {
 	.attrs = ocf_attrs,
 };
 

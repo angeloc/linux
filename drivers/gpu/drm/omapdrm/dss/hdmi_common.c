@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 
 #define DSS_SUBSYS_NAME "HDMI"
 
@@ -145,4 +146,18 @@ int hdmi_compute_acr(u32 pclk, u32 sample_freq, u32 *n, u32 *cts)
 	*cts = (pclk/1000) * (*n / 128) * deep_color / (sample_freq / 10);
 
 	return 0;
+}
+
+void hdmi_audio_hpd_notify(struct omap_hdmi *hdmi,
+			   enum drm_connector_status status)
+{
+	guard(mutex)(&hdmi->audio_lock);
+
+	if (hdmi->audio_pdev) {
+		struct device *dev = &hdmi->audio_pdev->dev;
+		struct omap_hdmi_audio_pdata *ha = dev_get_platdata(dev);
+
+		if (ha->audio_hpd)
+			ha->audio_hpd(dev, status == connector_status_connected);
+	}
 }

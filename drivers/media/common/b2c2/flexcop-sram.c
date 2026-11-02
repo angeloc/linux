@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Linux driver for digital TV devices equipped with B2C2 FlexcopII(b)/III
  * flexcop-sram.c - functions for controlling the SRAM
@@ -351,7 +352,7 @@ static int flexcop_sram_detect(struct flexcop_device *fc)
 	sram_set_size(adapter, 0x10000);
 	sram_init(adapter);
 	write_reg_dw(adapter, 0x208, tmp);
-	dprintk("%s: SRAM detection failed. Set to 32K \n", __func__);
+	dprintk("%s: SRAM detection failed. Set to 32K\n", __func__);
 	return 0;
 }
 

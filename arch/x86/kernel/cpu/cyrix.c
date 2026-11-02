@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include <linux/isa-dma.h>
 #include <linux/pci.h>
 #include <asm/dma.h>
 #include <linux/io.h>
@@ -9,6 +11,8 @@
 #include <asm/pci-direct.h>
 #include <asm/tsc.h>
 #include <asm/cpufeature.h>
+#include <linux/sched.h>
+#include <linux/sched/clock.h>
 
 #include "cpu.h"
 
@@ -121,7 +125,7 @@ static void set_cx86_reorder(void)
 	setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10); /* enable MAPEN */
 
 	/* Load/Store Serialize to mem access disable (=reorder it) */
-	setCx86_old(CX86_PCR0, getCx86_old(CX86_PCR0) & ~0x80);
+	setCx86(CX86_PCR0, getCx86(CX86_PCR0) & ~0x80);
 	/* set load/store serialize from 1GB to 4GB */
 	ccr3 |= 0xe0;
 	setCx86(CX86_CCR3, ccr3);
@@ -132,11 +136,11 @@ static void set_cx86_memwb(void)
 	pr_info("Enable Memory-Write-back mode on Cyrix/NSC processor.\n");
 
 	/* CCR2 bit 2: unlock NW bit */
-	setCx86_old(CX86_CCR2, getCx86_old(CX86_CCR2) & ~0x04);
+	setCx86(CX86_CCR2, getCx86(CX86_CCR2) & ~0x04);
 	/* set 'Not Write-through' */
 	write_cr0(read_cr0() | X86_CR0_NW);
 	/* CCR2 bit 2: lock NW bit and set WT1 */
-	setCx86_old(CX86_CCR2, getCx86_old(CX86_CCR2) | 0x14);
+	setCx86(CX86_CCR2, getCx86(CX86_CCR2) | 0x14);
 }
 
 /*
@@ -149,15 +153,15 @@ static void geode_configure(void)
 	u8 ccr3;
 	local_irq_save(flags);
 
-	/* Suspend on halt power saving and enable #SUSP pin */
-	setCx86_old(CX86_CCR2, getCx86_old(CX86_CCR2) | 0x88);
+	/* Suspend on halt power saving */
+	setCx86(CX86_CCR2, getCx86(CX86_CCR2) | 0x08);
 
 	ccr3 = getCx86(CX86_CCR3);
 	setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10);	/* enable MAPEN */
 
 
 	/* FPU fast, DTE cache, Mem bypass */
-	setCx86_old(CX86_CCR4, getCx86_old(CX86_CCR4) | 0x38);
+	setCx86(CX86_CCR4, getCx86(CX86_CCR4) | 0x38);
 	setCx86(CX86_CCR3, ccr3);			/* disable MAPEN */
 
 	set_cx86_memwb();
@@ -191,12 +195,6 @@ static void init_cyrix(struct cpuinfo_x86 *c)
 	char *buf = c->x86_model_id;
 	const char *p = NULL;
 
-	/*
-	 * Bit 31 in normal CPUID used for nonstandard 3DNow ID;
-	 * 3DNow is IDd by bit 31 in extended CPUID (1*32+31) anyway
-	 */
-	clear_cpu_cap(c, 0*32+31);
-
 	/* Cyrix used bit 24 in extended (AMD) CPUID for Cyrix MMX extensions */
 	if (test_cpu_cap(c, 1*32+24)) {
 		clear_cpu_cap(c, 1*32+24);
@@ -212,7 +210,7 @@ static void init_cyrix(struct cpuinfo_x86 *c)
 
 	/* common case step number/rev -- exceptions handled below */
 	c->x86_model = (dir1 >> 4) + 1;
-	c->x86_mask = dir1 & 0xf;
+	c->x86_stepping = dir1 & 0xf;
 
 	/* Now cook; the original recipe is by Channing Corn, from Cyrix.
 	 * We do the same thing for each generation: we work out
@@ -253,6 +251,7 @@ static void init_cyrix(struct cpuinfo_x86 *c)
 		break;
 
 	case 4: /* MediaGX/GXm or Geode GXM/GXLV/GX1 */
+	case 11: /* GX1 with inverted Device ID */
 #ifdef CONFIG_PCI
 	{
 		u32 vendor, device;
@@ -287,12 +286,12 @@ static void init_cyrix(struct cpuinfo_x86 *c)
 			mark_tsc_unstable("cyrix 5510/5520 detected");
 	}
 #endif
-		c->x86_cache_size = 16;	/* Yep 16K integrated cache thats it */
+		c->x86_cache_size = 16;	/* Yep 16K integrated cache that's it */
 
 		/* GXm supports extended cpuid levels 'ala' AMD */
 		if (c->cpuid_level == 2) {
 			/* Enable cxMMX extensions (GX1 Datasheet 54) */
-			setCx86_old(CX86_CCR7, getCx86_old(CX86_CCR7) | 1);
+			setCx86(CX86_CCR7, getCx86(CX86_CCR7) | 1);
 
 			/*
 			 * GXm : 0x30 ... 0x5f GXm  datasheet 51
@@ -315,7 +314,7 @@ static void init_cyrix(struct cpuinfo_x86 *c)
 		if (dir1 > 7) {
 			dir0_msn++;  /* M II */
 			/* Enable MMX extensions (App note 108) */
-			setCx86_old(CX86_CCR7, getCx86_old(CX86_CCR7)|1);
+			setCx86(CX86_CCR7, getCx86(CX86_CCR7)|1);
 		} else {
 			/* A 6x86MX - it has the bug. */
 			set_cpu_bug(c, X86_BUG_COMA);
@@ -433,7 +432,7 @@ static void cyrix_identify(struct cpuinfo_x86 *c)
 			/* enable MAPEN  */
 			setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10);
 			/* enable cpuid  */
-			setCx86_old(CX86_CCR4, getCx86_old(CX86_CCR4) | 0x80);
+			setCx86(CX86_CCR4, getCx86(CX86_CCR4) | 0x80);
 			/* disable MAPEN */
 			setCx86(CX86_CCR3, ccr3);
 			local_irq_restore(flags);

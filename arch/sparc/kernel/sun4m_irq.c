@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * sun4m irq support
  *
@@ -10,11 +11,11 @@
  */
 
 #include <linux/slab.h>
+#include <linux/sched/debug.h>
+#include <linux/pgtable.h>
 
 #include <asm/timer.h>
 #include <asm/traps.h>
-#include <asm/pgalloc.h>
-#include <asm/pgtable.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 #include <asm/cacheflush.h>
@@ -267,7 +268,7 @@ static unsigned int sun4m_build_device_irq(struct platform_device *op,
 	if (unlikely(handler_data))
 		goto out;
 
-	handler_data = kzalloc(sizeof(struct sun4m_handler_data), GFP_ATOMIC);
+	handler_data = kzalloc_obj(struct sun4m_handler_data, GFP_ATOMIC);
 	if (unlikely(!handler_data)) {
 		prom_printf("IRQ: kzalloc(sun4m_handler_data) failed.\n");
 		prom_halt();

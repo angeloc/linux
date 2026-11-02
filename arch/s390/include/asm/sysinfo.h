@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * definition for store system information stsi
  *
  * Copyright IBM Corp. 2001, 2008
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License (version 2 only)
- * as published by the Free Software Foundation.
  *
  *    Author(s): Ulrich Weigand <weigand@de.ibm.com>
  *		 Christian Borntraeger <borntraeger@de.ibm.com>
@@ -14,8 +11,34 @@
 #ifndef __ASM_S390_SYSINFO_H
 #define __ASM_S390_SYSINFO_H
 
-#include <asm/bitsperlong.h>
 #include <linux/uuid.h>
+#include <asm/bitsperlong.h>
+#include <asm/asm.h>
+
+/*
+ * stsi - store system information
+ *
+ * Returns the current configuration level if function code 0 was specified.
+ * Otherwise returns 0 on success or a negative value on error.
+ */
+static inline int stsi(void *sysinfo, int fc, int sel1, int sel2)
+{
+	int r0 = (fc << 28) | sel1;
+	int cc;
+
+	asm volatile(
+		"	lr	%%r0,%[r0]\n"
+		"	lr	%%r1,%[r1]\n"
+		"	stsi	%[sysinfo]\n"
+		"	lr	%[r0],%%r0\n"
+		CC_IPM(cc)
+		: CC_OUT(cc, cc), [r0] "+d" (r0), [sysinfo] "=Q" (*(char *)sysinfo)
+		: [r1] "d" (sel2)
+		: CC_CLOBBER_LIST("0", "1", "memory"));
+	if (cc == 3)
+		return -EOPNOTSUPP;
+	return fc ? 0 : (unsigned int)r0 >> 28;
+}
 
 struct sysinfo_1_1_1 {
 	unsigned char p:1;
@@ -24,7 +47,8 @@ struct sysinfo_1_1_1 {
 	unsigned char :8;
 	unsigned char ccr;
 	unsigned char cai;
-	char reserved_0[28];
+	char reserved_0[20];
+	unsigned long lic;
 	char manufacturer[16];
 	char type[4];
 	char reserved_1[12];
@@ -42,6 +66,10 @@ struct sysinfo_1_1_1 {
 	unsigned int ncr;
 	unsigned int npr;
 	unsigned int ntr;
+	char reserved_3[4];
+	char model_var_cap[16];
+	unsigned int model_var_cap_rating;
+	unsigned int nvr;
 };
 
 struct sysinfo_1_2_1 {
@@ -69,12 +97,12 @@ struct sysinfo_1_2_2 {
 	unsigned short cpus_configured;
 	unsigned short cpus_standby;
 	unsigned short cpus_reserved;
-	unsigned short adjustment[0];
+	unsigned short adjustment[];
 };
 
 struct sysinfo_1_2_2_extension {
 	unsigned int alt_capability;
-	unsigned short alt_adjustment[0];
+	unsigned short alt_adjustment[];
 };
 
 struct sysinfo_2_2_1 {
@@ -107,6 +135,11 @@ struct sysinfo_2_2_2 {
 	char reserved_3[5];
 	unsigned short cpus_dedicated;
 	unsigned short cpus_shared;
+	char reserved_4[3];
+	unsigned char vsne;
+	uuid_t uuid;
+	char reserved_5[160];
+	char ext_name[256];
 };
 
 #define LPAR_CHAR_DEDICATED	(1 << 7)
@@ -127,9 +160,9 @@ struct sysinfo_3_2_2 {
 		unsigned int caf;
 		char cpi[16];
 		char reserved_1[3];
-		char ext_name_encoding;
+		unsigned char evmne;
 		unsigned int reserved_2;
-		uuid_be uuid;
+		uuid_t uuid;
 	} vm[8];
 	char reserved_3[1504];
 	char ext_names[8][256];
@@ -137,17 +170,26 @@ struct sysinfo_3_2_2 {
 
 extern int topology_max_mnest;
 
-#define TOPOLOGY_CORE_BITS	64
+/*
+ * Returns the maximum nesting level supported by the cpu topology code.
+ * The current maximum level is 4 which is the drawer level.
+ */
+static inline unsigned char topology_mnest_limit(void)
+{
+	return min(topology_max_mnest, 4);
+}
+
 #define TOPOLOGY_NR_MAG		6
 
 struct topology_core {
 	unsigned char nl;
 	unsigned char reserved0[3];
-	unsigned char :6;
+	unsigned char :5;
+	unsigned char d:1;
 	unsigned char pp:2;
 	unsigned char reserved1;
 	unsigned short origin;
-	unsigned long mask[TOPOLOGY_CORE_BITS / BITS_PER_LONG];
+	unsigned long mask;
 };
 
 struct topology_container {
@@ -169,7 +211,7 @@ struct sysinfo_15_1_x {
 	unsigned char reserved1;
 	unsigned char mnest;
 	unsigned char reserved2[4];
-	union topology_entry tle[0];
+	union topology_entry tle[];
 };
 
 int stsi(void *sysinfo, int fc, int sel1, int sel2);
@@ -185,4 +227,5 @@ struct service_level {
 int register_service_level(struct service_level *);
 int unregister_service_level(struct service_level *);
 
+int sthyi_fill(void *dst, u64 *rc);
 #endif /* __ASM_S390_SYSINFO_H */

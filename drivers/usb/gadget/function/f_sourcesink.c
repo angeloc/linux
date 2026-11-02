@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * f_sourcesink.c - USB peripheral source/sink configuration driver
  *
  * Copyright (C) 2003-2008 David Brownell
  * Copyright (C) 2008 by Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 /* #define VERBOSE_DEBUG */
@@ -17,10 +13,10 @@
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/usb/composite.h>
+#include <linux/usb/func_utils.h>
 #include <linux/err.h>
 
 #include "g_zero.h"
-#include "u_f.h"
 
 /*
  * SOURCE/SINK FUNCTION ... a primary testing vehicle for USB peripheral
@@ -50,6 +46,7 @@ struct f_sourcesink {
 	unsigned isoc_mult;
 	unsigned isoc_maxburst;
 	unsigned buflen;
+	unsigned bulk_maxburst;
 	unsigned bulk_qlen;
 	unsigned iso_qlen;
 };
@@ -293,9 +290,7 @@ static struct usb_gadget_strings *sourcesink_strings[] = {
 
 static inline struct usb_request *ss_alloc_ep_req(struct usb_ep *ep, int len)
 {
-	struct f_sourcesink		*ss = ep->driver_data;
-
-	return alloc_ep_req(ep, len, ss->buflen);
+	return alloc_ep_req(ep, len);
 }
 
 static void disable_ep(struct usb_composite_dev *cdev, struct usb_ep *ep)
@@ -333,6 +328,12 @@ sourcesink_bind(struct usb_configuration *c, struct usb_function *f)
 		return id;
 	source_sink_intf_alt0.bInterfaceNumber = id;
 	source_sink_intf_alt1.bInterfaceNumber = id;
+
+	if (ss->bulk_maxburst > 15)
+		ss->bulk_maxburst = 15;
+
+	ss_source_comp_desc.bMaxBurst = ss->bulk_maxburst;
+	ss_sink_comp_desc.bMaxBurst = ss->bulk_maxburst;
 
 	/* allocate bulk endpoints */
 	ss->in_ep = usb_ep_autoconfig(cdev->gadget, &fs_source_desc);
@@ -437,13 +438,12 @@ no_iso:
 	ss_iso_sink_desc.bEndpointAddress = fs_iso_sink_desc.bEndpointAddress;
 
 	ret = usb_assign_descriptors(f, fs_source_sink_descs,
-			hs_source_sink_descs, ss_source_sink_descs, NULL);
+			hs_source_sink_descs, ss_source_sink_descs,
+			ss_source_sink_descs);
 	if (ret)
 		return ret;
 
-	DBG(cdev, "%s speed %s: IN/%s, OUT/%s, ISO-IN/%s, ISO-OUT/%s\n",
-	    (gadget_is_superspeed(c->cdev->gadget) ? "super" :
-	     (gadget_is_dualspeed(c->cdev->gadget) ? "dual" : "full")),
+	DBG(cdev, "%s: IN/%s, OUT/%s, ISO-IN/%s, ISO-OUT/%s\n",
 			f->name, ss->in_ep->name, ss->out_ep->name,
 			ss->iso_in_ep ? ss->iso_in_ep->name : "<none>",
 			ss->iso_out_ep ? ss->iso_out_ep->name : "<none>");
@@ -565,6 +565,7 @@ static void source_sink_complete(struct usb_ep *ep, struct usb_request *req)
 #if 1
 		DBG(cdev, "%s complete --> %d, %d/%d\n", ep->name,
 				status, req->actual, req->length);
+		break;
 #endif
 	case -EREMOTEIO:		/* short read */
 		break;
@@ -588,6 +589,7 @@ static int source_sink_start_ep(struct f_sourcesink *ss, bool is_in,
 
 	if (is_iso) {
 		switch (speed) {
+		case USB_SPEED_SUPER_PLUS:
 		case USB_SPEED_SUPER:
 			size = ss->isoc_maxpacket *
 					(ss->isoc_mult + 1) *
@@ -606,7 +608,7 @@ static int source_sink_start_ep(struct f_sourcesink *ss, bool is_in,
 	} else {
 		ep = is_in ? ss->in_ep : ss->out_ep;
 		qlen = ss->bulk_qlen;
-		size = 0;
+		size = ss->buflen;
 	}
 
 	for (i = 0; i < qlen; i++) {
@@ -842,9 +844,9 @@ static struct usb_function *source_sink_alloc_func(
 	struct f_sourcesink     *ss;
 	struct f_ss_opts	*ss_opts;
 
-	ss = kzalloc(sizeof(*ss), GFP_KERNEL);
+	ss = kzalloc_obj(*ss);
 	if (!ss)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
 	ss_opts =  container_of(fi, struct f_ss_opts, func_inst);
 
@@ -858,6 +860,7 @@ static struct usb_function *source_sink_alloc_func(
 	ss->isoc_mult = ss_opts->isoc_mult;
 	ss->isoc_maxburst = ss_opts->isoc_maxburst;
 	ss->buflen = ss_opts->bulk_buflen;
+	ss->bulk_maxburst = ss_opts->bulk_maxburst;
 	ss->bulk_qlen = ss_opts->bulk_qlen;
 	ss->iso_qlen = ss_opts->iso_qlen;
 
@@ -887,7 +890,7 @@ static void ss_attr_release(struct config_item *item)
 	usb_put_function_instance(&ss_opts->func_inst);
 }
 
-static struct configfs_item_operations ss_item_ops = {
+static const struct configfs_item_operations ss_item_ops = {
 	.release		= ss_attr_release,
 };
 
@@ -1106,6 +1109,49 @@ end:
 
 CONFIGFS_ATTR(f_ss_opts_, isoc_maxburst);
 
+static ssize_t f_ss_opts_bulk_maxburst_show(struct config_item *item, char *page)
+{
+	struct f_ss_opts *opts = to_f_ss_opts(item);
+	int result;
+
+	mutex_lock(&opts->lock);
+	result = sysfs_emit(page, "%u\n", opts->bulk_maxburst);
+	mutex_unlock(&opts->lock);
+
+	return result;
+}
+
+static ssize_t f_ss_opts_bulk_maxburst_store(struct config_item *item,
+					     const char *page, size_t len)
+{
+	struct f_ss_opts *opts = to_f_ss_opts(item);
+	int ret;
+	u8 num;
+
+	mutex_lock(&opts->lock);
+	if (opts->refcnt) {
+		ret = -EBUSY;
+		goto end;
+	}
+
+	ret = kstrtou8(page, 0, &num);
+	if (ret)
+		goto end;
+
+	if (num > 15) {
+		ret = -EINVAL;
+		goto end;
+	}
+
+	opts->bulk_maxburst = num;
+	ret = len;
+end:
+	mutex_unlock(&opts->lock);
+	return ret;
+}
+
+CONFIGFS_ATTR(f_ss_opts_, bulk_maxburst);
+
 static ssize_t f_ss_opts_bulk_buflen_show(struct config_item *item, char *page)
 {
 	struct f_ss_opts *opts = to_f_ss_opts(item);
@@ -1227,12 +1273,13 @@ static struct configfs_attribute *ss_attrs[] = {
 	&f_ss_opts_attr_isoc_mult,
 	&f_ss_opts_attr_isoc_maxburst,
 	&f_ss_opts_attr_bulk_buflen,
+	&f_ss_opts_attr_bulk_maxburst,
 	&f_ss_opts_attr_bulk_qlen,
 	&f_ss_opts_attr_iso_qlen,
 	NULL,
 };
 
-static struct config_item_type ss_func_type = {
+static const struct config_item_type ss_func_type = {
 	.ct_item_ops    = &ss_item_ops,
 	.ct_attrs	= ss_attrs,
 	.ct_owner       = THIS_MODULE,
@@ -1250,7 +1297,7 @@ static struct usb_function_instance *source_sink_alloc_inst(void)
 {
 	struct f_ss_opts *ss_opts;
 
-	ss_opts = kzalloc(sizeof(*ss_opts), GFP_KERNEL);
+	ss_opts = kzalloc_obj(*ss_opts);
 	if (!ss_opts)
 		return ERR_PTR(-ENOMEM);
 	mutex_init(&ss_opts->lock);
@@ -1289,4 +1336,5 @@ static void __exit sslb_modexit(void)
 module_init(sslb_modinit);
 module_exit(sslb_modexit);
 
+MODULE_DESCRIPTION("USB peripheral source/sink configuration driver");
 MODULE_LICENSE("GPL");

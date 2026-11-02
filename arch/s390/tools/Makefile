@@ -1,15 +1,42 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for s390 specific build tools
 #
 
-hostprogs-y		    += gen_facilities
-HOSTCFLAGS_gen_facilities.o += -Wall $(LINUXINCLUDE)
+include $(srctree)/arch/s390/tools/Makefile.arm64h
 
-define filechk_facilities.h
-	$(obj)/gen_facilities
-endef
+kapi := arch/$(ARCH)/include/generated/asm
+kapi-hdrs-y := $(kapi)/dis-defs.h
+kapi-hdrs-y += $(kapi)/facility-defs.h
+kapi-hdrs-y += $(kapi)/pgmcheck-defs.h
 
-$(obj)/gen_facilities.o: $(srctree)/arch/s390/tools/gen_facilities.c
+kapi-hdrs-$(CONFIG_KVM) += $(ARM64_TARGETS)
 
-include/generated/facilities.h: $(obj)/gen_facilities FORCE
-	$(call filechk,facilities.h)
+PHONY += kapi
+
+kapi:	$(kapi-hdrs-y) $(kapi-hdrs-m)
+
+hostprogs		    += gen_bitmaps
+hostprogs		    += gen_opcode_table
+
+HOSTCFLAGS_gen_bitmaps.o += $(LINUXINCLUDE)
+
+filechk_facility-defs.h = $(obj)/gen_bitmaps --facility
+filechk_pgmcheck-defs.h = $(obj)/gen_bitmaps --pgmcheck
+
+filechk_dis-defs.h = \
+	$(obj)/gen_opcode_table < $(srctree)/arch/$(ARCH)/tools/opcodes.txt
+
+$(kapi)/facility-defs.h: $(obj)/gen_bitmaps FORCE
+	$(call filechk,facility-defs.h)
+
+$(kapi)/pgmcheck-defs.h: $(obj)/gen_bitmaps FORCE
+	$(call filechk,pgmcheck-defs.h)
+
+$(kapi)/dis-defs.h: $(obj)/gen_opcode_table FORCE
+	$(call filechk,dis-defs.h)
+
+hostprogs	+= relocs
+PHONY		+= relocs
+relocs: $(obj)/relocs
+	@:

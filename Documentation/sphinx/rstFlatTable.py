@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8; mode: python -*-
+# SPDX-License-Identifier: GPL-2.0
 # pylint: disable=C0330, R0903, R0912
 
-u"""
+"""
     flat-table
     ~~~~~~~~~~
 
@@ -22,7 +23,7 @@ u"""
 
     * *auto span* rightmost cell of a table row over the missing cells on the
       right side of that table-row.  With Option ``:fill-cells:`` this behavior
-      can changed from *auto span* to *auto fill*, which automaticly inserts
+      can be changed from *auto span* to *auto fill*, which automatically inserts
       (empty) cells instead of spanning the last cell.
 
     Options:
@@ -42,8 +43,6 @@ u"""
 # imports
 # ==============================================================================
 
-import sys
-
 from docutils import nodes
 from docutils.parsers.rst import directives, roles
 from docutils.parsers.rst.directives.tables import Table
@@ -53,17 +52,7 @@ from docutils.utils import SystemMessagePropagation
 # common globals
 # ==============================================================================
 
-# The version numbering follows numbering of the specification
-# (Documentation/books/kernel-doc-HOWTO).
 __version__  = '1.0'
-
-PY3 = sys.version_info[0] == 3
-PY2 = sys.version_info[0] == 2
-
-if PY3:
-    # pylint: disable=C0103, W0622
-    unicode     = str
-    basestring  = str
 
 # ==============================================================================
 def setup(app):
@@ -72,6 +61,12 @@ def setup(app):
     app.add_directive("flat-table", FlatTable)
     roles.register_local_role('cspan', c_span)
     roles.register_local_role('rspan', r_span)
+
+    return dict(
+        version = __version__,
+        parallel_read_safe = True,
+        parallel_write_safe = True
+    )
 
 # ==============================================================================
 def c_span(name, rawtext, text, lineno, inliner, options=None, content=None):
@@ -105,7 +100,7 @@ class colSpan(nodes.General, nodes.Element): pass # pylint: disable=C0103,C0321
 class FlatTable(Table):
 # ==============================================================================
 
-    u"""FlatTable (``flat-table``) directive"""
+    """FlatTable (``flat-table``) directive"""
 
     option_spec = {
         'name': directives.unchanged
@@ -141,7 +136,7 @@ class FlatTable(Table):
 class ListTableBuilder(object):
 # ==============================================================================
 
-    u"""Builds a table from a double-stage list"""
+    """Builds a table from a double-stage list"""
 
     def __init__(self, directive):
         self.directive = directive
@@ -151,6 +146,11 @@ class ListTableBuilder(object):
     def buildTableNode(self):
 
         colwidths    = self.directive.get_column_widths(self.max_cols)
+        if isinstance(colwidths, tuple):
+            # Since docutils 0.13, get_column_widths returns a (widths,
+            # colwidths) tuple, where widths is a string (i.e. 'auto').
+            # See https://sourceforge.net/p/docutils/patches/120/.
+            colwidths = colwidths[1]
         stub_columns = self.directive.options.get('stub-columns', 0)
         header_rows  = self.directive.options.get('header-rows', 0)
 
@@ -162,7 +162,7 @@ class ListTableBuilder(object):
         for colwidth in colwidths:
             colspec = nodes.colspec(colwidth=colwidth)
             # FIXME: It seems, that the stub method only works well in the
-            # absence of rowspan (observed by the html buidler, the docutils-xml
+            # absence of rowspan (observed by the html builder, the docutils-xml
             # build seems OK).  This is not extraordinary, because there exists
             # no table directive (except *this* flat-table) which allows to
             # define coexistent of rowspan and stubs (there was no use-case
@@ -213,7 +213,7 @@ class ListTableBuilder(object):
         raise SystemMessagePropagation(error)
 
     def parseFlatTableNode(self, node):
-        u"""parses the node from a :py:class:`FlatTable` directive's body"""
+        """parses the node from a :py:class:`FlatTable` directive's body"""
 
         if len(node) != 1 or not isinstance(node[0], nodes.bullet_list):
             self.raiseError(
@@ -226,7 +226,7 @@ class ListTableBuilder(object):
         self.roundOffTableDefinition()
 
     def roundOffTableDefinition(self):
-        u"""Round off the table definition.
+        """Round off the table definition.
 
         This method rounds off the table definition in :py:member:`rows`.
 

@@ -1,9 +1,10 @@
-/// Make sure pm_runtime_* calls does not use unnecessary IS_ERR_VALUE
+// SPDX-License-Identifier: GPL-2.0-only
+/// Make sure pm_runtime_* calls do not unnecessarily use IS_ERR_VALUE
 ///
 // Keywords: pm_runtime
 // Confidence: Medium
-// Copyright (C) 2013 Texas Instruments Incorporated - GPLv2.
-// URL: http://coccinelle.lip6.fr/
+// Copyright (C) 2013 Texas Instruments Incorporated -
+// URL: https://coccinelle.gitlabpages.inria.fr/website
 // Options: --include-headers
 
 virtual patch
@@ -17,9 +18,10 @@ virtual report
 
 @runtime_bad_err_handle exists@
 expression ret;
+position p;
 @@
 (
-ret = \(pm_runtime_idle\|
+ret@p = \(pm_runtime_idle\|
 	pm_runtime_suspend\|
 	pm_runtime_autosuspend\|
 	pm_runtime_resume\|
@@ -35,7 +37,6 @@ ret = \(pm_runtime_idle\|
 	pm_runtime_put_sync_autosuspend\|
 	pm_runtime_set_active\|
 	pm_schedule_suspend\|
-	pm_runtime_barrier\|
 	pm_generic_runtime_suspend\|
 	pm_generic_runtime_resume\)(...);
 ...
@@ -47,12 +48,13 @@ IS_ERR_VALUE(ret)
 //  For context mode
 //----------------------------------------------------------
 
-@depends on runtime_bad_err_handle && context@
+@depends on context@
 identifier pm_runtime_api;
 expression ret;
+position runtime_bad_err_handle.p;
 @@
 (
-ret = pm_runtime_api(...);
+ret@p = pm_runtime_api(...);
 ...
 * IS_ERR_VALUE(ret)
 ...
@@ -62,12 +64,13 @@ ret = pm_runtime_api(...);
 //  For patch mode
 //----------------------------------------------------------
 
-@depends on runtime_bad_err_handle && patch@
+@depends on patch@
 identifier pm_runtime_api;
 expression ret;
+position runtime_bad_err_handle.p;
 @@
 (
-ret = pm_runtime_api(...);
+ret@p = pm_runtime_api(...);
 ...
 - IS_ERR_VALUE(ret)
 + ret < 0
@@ -78,13 +81,14 @@ ret = pm_runtime_api(...);
 //  For org and report mode
 //----------------------------------------------------------
 
-@r depends on runtime_bad_err_handle && (org || report) exists@
+@r depends on (org || report) exists@
 position p1, p2;
 identifier pm_runtime_api;
 expression ret;
+position runtime_bad_err_handle.p;
 @@
 (
-ret = pm_runtime_api@p1(...);
+ret@p = pm_runtime_api@p1(...);
 ...
 IS_ERR_VALUE@p2(ret)
 ...
@@ -105,5 +109,5 @@ p2 << r.p2;
 pm_runtime_api << r.pm_runtime_api;
 @@
 
-msg = "%s returns < 0 as error. Unecessary IS_ERR_VALUE at line %s" % (pm_runtime_api, p2[0].line)
+msg = "%s returns < 0 as error. Unnecessary IS_ERR_VALUE at line %s" % (pm_runtime_api, p2[0].line)
 coccilib.report.print_report(p1[0],msg)

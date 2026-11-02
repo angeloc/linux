@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
    RFCOMM implementation for Linux Bluetooth stack (BlueZ)
    Copyright (C) 2002 Maxim Krasnyansky <maxk@qualcomm.com>
    Copyright (C) 2002 Marcel Holtmann <marcel@holtmann.org>
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -21,6 +18,8 @@
    SOFTWARE IS DISCLAIMED.
 */
 
+#include <linux/refcount.h>
+
 #ifndef __RFCOMM_H
 #define __RFCOMM_H
 
@@ -32,7 +31,6 @@
 #define RFCOMM_DEFAULT_MTU	127
 #define RFCOMM_DEFAULT_CREDITS	7
 
-#define RFCOMM_MAX_L2CAP_MTU	1013
 #define RFCOMM_MAX_CREDITS	40
 
 #define RFCOMM_SKB_HEAD_RESERVE	8
@@ -174,7 +172,7 @@ struct rfcomm_dlc {
 	struct mutex  lock;
 	unsigned long state;
 	unsigned long flags;
-	atomic_t      refcnt;
+	refcount_t    refcnt;
 	u8            dlci;
 	u8            addr;
 	u8            priority;
@@ -209,6 +207,7 @@ struct rfcomm_dlc {
 #define RFCOMM_AUTH_REJECT  7
 #define RFCOMM_DEFER_SETUP  8
 #define RFCOMM_ENC_DROP     9
+#define RFCOMM_CLOSED       10
 
 /* Scheduling flags and events */
 #define RFCOMM_SCHED_WAKEUP 31
@@ -227,6 +226,9 @@ struct rfcomm_dlc {
 int rfcomm_send_rpn(struct rfcomm_session *s, int cr, u8 dlci,
 			u8 bit_rate, u8 data_bits, u8 stop_bits,
 			u8 parity, u8 flow_ctrl_settings,
+			u8 xon_char, u8 xoff_char, u16 param_mask);
+int rfcomm_dlc_send_rpn(struct rfcomm_dlc *d, u8 bit_rate, u8 data_bits,
+			u8 stop_bits, u8 parity, u8 flow_ctrl_settings,
 			u8 xon_char, u8 xoff_char, u16 param_mask);
 
 /* ---- RFCOMM DLCs (channels) ---- */
@@ -247,12 +249,12 @@ struct rfcomm_dlc *rfcomm_dlc_exists(bdaddr_t *src, bdaddr_t *dst, u8 channel);
 
 static inline void rfcomm_dlc_hold(struct rfcomm_dlc *d)
 {
-	atomic_inc(&d->refcnt);
+	refcount_inc(&d->refcnt);
 }
 
 static inline void rfcomm_dlc_put(struct rfcomm_dlc *d)
 {
-	if (atomic_dec_and_test(&d->refcnt))
+	if (refcount_dec_and_test(&d->refcnt))
 		rfcomm_dlc_free(d);
 }
 
@@ -354,7 +356,7 @@ struct rfcomm_dev_info {
 
 struct rfcomm_dev_list_req {
 	u16      dev_num;
-	struct   rfcomm_dev_info dev_info[0];
+	struct   rfcomm_dev_info dev_info[] __counted_by(dev_num);
 };
 
 int  rfcomm_dev_ioctl(struct sock *sk, unsigned int cmd, void __user *arg);

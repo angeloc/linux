@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * QNX6 file system, Linux implementation.
  *
@@ -99,7 +100,7 @@ struct qnx6_super_block *qnx6_mmi_fill_super(struct super_block *s, int silent)
 		goto out;
 	}
 
-	qsb = kmalloc(sizeof(*qsb), GFP_KERNEL);
+	qsb = kmalloc_obj(*qsb);
 	if (!qsb) {
 		pr_err("unable to allocate memory.\n");
 		goto out;

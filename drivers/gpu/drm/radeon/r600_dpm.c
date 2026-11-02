@@ -22,15 +22,13 @@
  * Authors: Alex Deucher
  */
 
-#include "drmP.h"
 #include "radeon.h"
 #include "radeon_asic.h"
 #include "r600d.h"
 #include "r600_dpm.h"
 #include "atom.h"
 
-const u32 r600_utc[R600_PM_NUMBER_OF_TC] =
-{
+const u32 r600_utc[R600_PM_NUMBER_OF_TC] = {
 	R600_UTC_DFLT_00,
 	R600_UTC_DFLT_01,
 	R600_UTC_DFLT_02,
@@ -48,8 +46,7 @@ const u32 r600_utc[R600_PM_NUMBER_OF_TC] =
 	R600_UTC_DFLT_14,
 };
 
-const u32 r600_dtc[R600_PM_NUMBER_OF_TC] =
-{
+const u32 r600_dtc[R600_PM_NUMBER_OF_TC] = {
 	R600_DTC_DFLT_00,
 	R600_DTC_DFLT_01,
 	R600_DTC_DFLT_02,
@@ -69,106 +66,110 @@ const u32 r600_dtc[R600_PM_NUMBER_OF_TC] =
 
 void r600_dpm_print_class_info(u32 class, u32 class2)
 {
-	printk("\tui class: ");
+	const char *s;
+
 	switch (class & ATOM_PPLIB_CLASSIFICATION_UI_MASK) {
 	case ATOM_PPLIB_CLASSIFICATION_UI_NONE:
 	default:
-		printk("none\n");
+		s = "none";
 		break;
 	case ATOM_PPLIB_CLASSIFICATION_UI_BATTERY:
-		printk("battery\n");
+		s = "battery";
 		break;
 	case ATOM_PPLIB_CLASSIFICATION_UI_BALANCED:
-		printk("balanced\n");
+		s = "balanced";
 		break;
 	case ATOM_PPLIB_CLASSIFICATION_UI_PERFORMANCE:
-		printk("performance\n");
+		s = "performance";
 		break;
 	}
-	printk("\tinternal class: ");
+	printk("\tui class: %s\n", s);
+
+	printk("\tinternal class:");
 	if (((class & ~ATOM_PPLIB_CLASSIFICATION_UI_MASK) == 0) &&
 	    (class2 == 0))
-		printk("none");
+		pr_cont(" none");
 	else {
 		if (class & ATOM_PPLIB_CLASSIFICATION_BOOT)
-			printk("boot ");
+			pr_cont(" boot");
 		if (class & ATOM_PPLIB_CLASSIFICATION_THERMAL)
-			printk("thermal ");
+			pr_cont(" thermal");
 		if (class & ATOM_PPLIB_CLASSIFICATION_LIMITEDPOWERSOURCE)
-			printk("limited_pwr ");
+			pr_cont(" limited_pwr");
 		if (class & ATOM_PPLIB_CLASSIFICATION_REST)
-			printk("rest ");
+			pr_cont(" rest");
 		if (class & ATOM_PPLIB_CLASSIFICATION_FORCED)
-			printk("forced ");
+			pr_cont(" forced");
 		if (class & ATOM_PPLIB_CLASSIFICATION_3DPERFORMANCE)
-			printk("3d_perf ");
+			pr_cont(" 3d_perf");
 		if (class & ATOM_PPLIB_CLASSIFICATION_OVERDRIVETEMPLATE)
-			printk("ovrdrv ");
+			pr_cont(" ovrdrv");
 		if (class & ATOM_PPLIB_CLASSIFICATION_UVDSTATE)
-			printk("uvd ");
+			pr_cont(" uvd");
 		if (class & ATOM_PPLIB_CLASSIFICATION_3DLOW)
-			printk("3d_low ");
+			pr_cont(" 3d_low");
 		if (class & ATOM_PPLIB_CLASSIFICATION_ACPI)
-			printk("acpi ");
+			pr_cont(" acpi");
 		if (class & ATOM_PPLIB_CLASSIFICATION_HD2STATE)
-			printk("uvd_hd2 ");
+			pr_cont(" uvd_hd2");
 		if (class & ATOM_PPLIB_CLASSIFICATION_HDSTATE)
-			printk("uvd_hd ");
+			pr_cont(" uvd_hd");
 		if (class & ATOM_PPLIB_CLASSIFICATION_SDSTATE)
-			printk("uvd_sd ");
+			pr_cont(" uvd_sd");
 		if (class2 & ATOM_PPLIB_CLASSIFICATION2_LIMITEDPOWERSOURCE_2)
-			printk("limited_pwr2 ");
+			pr_cont(" limited_pwr2");
 		if (class2 & ATOM_PPLIB_CLASSIFICATION2_ULV)
-			printk("ulv ");
+			pr_cont(" ulv");
 		if (class2 & ATOM_PPLIB_CLASSIFICATION2_MVC)
-			printk("uvd_mvc ");
+			pr_cont(" uvd_mvc");
 	}
-	printk("\n");
+	pr_cont("\n");
 }
 
 void r600_dpm_print_cap_info(u32 caps)
 {
-	printk("\tcaps: ");
+	printk("\tcaps:");
 	if (caps & ATOM_PPLIB_SINGLE_DISPLAY_ONLY)
-		printk("single_disp ");
+		pr_cont(" single_disp");
 	if (caps & ATOM_PPLIB_SUPPORTS_VIDEO_PLAYBACK)
-		printk("video ");
+		pr_cont(" video");
 	if (caps & ATOM_PPLIB_DISALLOW_ON_DC)
-		printk("no_dc ");
-	printk("\n");
+		pr_cont(" no_dc");
+	pr_cont("\n");
 }
 
 void r600_dpm_print_ps_status(struct radeon_device *rdev,
 			      struct radeon_ps *rps)
 {
-	printk("\tstatus: ");
+	printk("\tstatus:");
 	if (rps == rdev->pm.dpm.current_ps)
-		printk("c ");
+		pr_cont(" c");
 	if (rps == rdev->pm.dpm.requested_ps)
-		printk("r ");
+		pr_cont(" r");
 	if (rps == rdev->pm.dpm.boot_ps)
-		printk("b ");
-	printk("\n");
+		pr_cont(" b");
+	pr_cont("\n");
 }
 
 u32 r600_dpm_get_vblank_time(struct radeon_device *rdev)
 {
-	struct drm_device *dev = rdev->ddev;
+	struct drm_device *dev = rdev_to_drm(rdev);
 	struct drm_crtc *crtc;
 	struct radeon_crtc *radeon_crtc;
-	u32 line_time_us, vblank_lines;
+	u32 vblank_in_pixels;
 	u32 vblank_time_us = 0xffffffff; /* if the displays are off, vblank time is max */
 
 	if (rdev->num_crtc && rdev->mode_info.mode_config_initialized) {
 		list_for_each_entry(crtc, &dev->mode_config.crtc_list, head) {
 			radeon_crtc = to_radeon_crtc(crtc);
 			if (crtc->enabled && radeon_crtc->enabled && radeon_crtc->hw_mode.clock) {
-				line_time_us = (radeon_crtc->hw_mode.crtc_htotal * 1000) /
-					radeon_crtc->hw_mode.clock;
-				vblank_lines = radeon_crtc->hw_mode.crtc_vblank_end -
-					radeon_crtc->hw_mode.crtc_vdisplay +
-					(radeon_crtc->v_border * 2);
-				vblank_time_us = vblank_lines * line_time_us;
+				vblank_in_pixels =
+					radeon_crtc->hw_mode.crtc_htotal *
+					(radeon_crtc->hw_mode.crtc_vblank_end -
+					 radeon_crtc->hw_mode.crtc_vdisplay +
+					 (radeon_crtc->v_border * 2));
+
+				vblank_time_us = vblank_in_pixels * 1000 / radeon_crtc->hw_mode.clock;
 				break;
 			}
 		}
@@ -179,7 +180,7 @@ u32 r600_dpm_get_vblank_time(struct radeon_device *rdev)
 
 u32 r600_dpm_get_vrefresh(struct radeon_device *rdev)
 {
-	struct drm_device *dev = rdev->ddev;
+	struct drm_device *dev = rdev_to_drm(rdev);
 	struct drm_crtc *crtc;
 	struct radeon_crtc *radeon_crtc;
 	u32 vrefresh = 0;
@@ -817,12 +818,11 @@ union fan_info {
 static int r600_parse_clk_voltage_dep_table(struct radeon_clock_voltage_dependency_table *radeon_table,
 					    ATOM_PPLIB_Clock_Voltage_Dependency_Table *atom_table)
 {
-	u32 size = atom_table->ucNumEntries *
-		sizeof(struct radeon_clock_voltage_dependency_entry);
 	int i;
 	ATOM_PPLIB_Clock_Voltage_Dependency_Record *entry;
 
-	radeon_table->entries = kzalloc(size, GFP_KERNEL);
+	radeon_table->entries = kzalloc_objs(struct radeon_clock_voltage_dependency_entry,
+					     atom_table->ucNumEntries);
 	if (!radeon_table->entries)
 		return -ENOMEM;
 
@@ -932,7 +932,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ret = r600_parse_clk_voltage_dep_table(&rdev->pm.dpm.dyn_state.vddci_dependency_on_mclk,
 							       dep_table);
 			if (ret) {
-				kfree(rdev->pm.dpm.dyn_state.vddc_dependency_on_sclk.entries);
+				r600_free_extended_power_table(rdev);
 				return ret;
 			}
 		}
@@ -943,8 +943,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ret = r600_parse_clk_voltage_dep_table(&rdev->pm.dpm.dyn_state.vddc_dependency_on_mclk,
 							       dep_table);
 			if (ret) {
-				kfree(rdev->pm.dpm.dyn_state.vddc_dependency_on_sclk.entries);
-				kfree(rdev->pm.dpm.dyn_state.vddci_dependency_on_mclk.entries);
+				r600_free_extended_power_table(rdev);
 				return ret;
 			}
 		}
@@ -955,9 +954,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ret = r600_parse_clk_voltage_dep_table(&rdev->pm.dpm.dyn_state.mvdd_dependency_on_mclk,
 							       dep_table);
 			if (ret) {
-				kfree(rdev->pm.dpm.dyn_state.vddc_dependency_on_sclk.entries);
-				kfree(rdev->pm.dpm.dyn_state.vddci_dependency_on_mclk.entries);
-				kfree(rdev->pm.dpm.dyn_state.vddc_dependency_on_mclk.entries);
+				r600_free_extended_power_table(rdev);
 				return ret;
 			}
 		}
@@ -987,9 +984,8 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ATOM_PPLIB_PhaseSheddingLimits_Record *entry;
 
 			rdev->pm.dpm.dyn_state.phase_shedding_limits_table.entries =
-				kzalloc(psl->ucNumEntries *
-					sizeof(struct radeon_phase_shedding_limits_entry),
-					GFP_KERNEL);
+				kzalloc_objs(struct radeon_phase_shedding_limits_entry,
+					     psl->ucNumEntries);
 			if (!rdev->pm.dpm.dyn_state.phase_shedding_limits_table.entries) {
 				r600_free_extended_power_table(rdev);
 				return -ENOMEM;
@@ -1197,7 +1193,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 				(mode_info->atom_context->bios + data_offset +
 				 le16_to_cpu(ext_hdr->usPPMTableOffset));
 			rdev->pm.dpm.dyn_state.ppm_table =
-				kzalloc(sizeof(struct radeon_ppm_table), GFP_KERNEL);
+				kzalloc_obj(struct radeon_ppm_table);
 			if (!rdev->pm.dpm.dyn_state.ppm_table) {
 				r600_free_extended_power_table(rdev);
 				return -ENOMEM;
@@ -1255,7 +1251,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 					 le16_to_cpu(ext_hdr->usPowerTuneTableOffset));
 			ATOM_PowerTune_Table *pt;
 			rdev->pm.dpm.dyn_state.cac_tdp_table =
-				kzalloc(sizeof(struct radeon_cac_tdp_table), GFP_KERNEL);
+				kzalloc_obj(struct radeon_cac_tdp_table);
 			if (!rdev->pm.dpm.dyn_state.cac_tdp_table) {
 				r600_free_extended_power_table(rdev);
 				return -ENOMEM;
@@ -1297,17 +1293,29 @@ void r600_free_extended_power_table(struct radeon_device *rdev)
 	struct radeon_dpm_dynamic_state *dyn_state = &rdev->pm.dpm.dyn_state;
 
 	kfree(dyn_state->vddc_dependency_on_sclk.entries);
+	dyn_state->vddc_dependency_on_sclk.entries = NULL;
 	kfree(dyn_state->vddci_dependency_on_mclk.entries);
+	dyn_state->vddci_dependency_on_mclk.entries = NULL;
 	kfree(dyn_state->vddc_dependency_on_mclk.entries);
+	dyn_state->vddc_dependency_on_mclk.entries = NULL;
 	kfree(dyn_state->mvdd_dependency_on_mclk.entries);
+	dyn_state->mvdd_dependency_on_mclk.entries = NULL;
 	kfree(dyn_state->cac_leakage_table.entries);
+	dyn_state->cac_leakage_table.entries = NULL;
 	kfree(dyn_state->phase_shedding_limits_table.entries);
+	dyn_state->phase_shedding_limits_table.entries = NULL;
 	kfree(dyn_state->ppm_table);
+	dyn_state->ppm_table = NULL;
 	kfree(dyn_state->cac_tdp_table);
+	dyn_state->cac_tdp_table = NULL;
 	kfree(dyn_state->vce_clock_voltage_dependency_table.entries);
+	dyn_state->vce_clock_voltage_dependency_table.entries = NULL;
 	kfree(dyn_state->uvd_clock_voltage_dependency_table.entries);
+	dyn_state->uvd_clock_voltage_dependency_table.entries = NULL;
 	kfree(dyn_state->samu_clock_voltage_dependency_table.entries);
+	dyn_state->samu_clock_voltage_dependency_table.entries = NULL;
 	kfree(dyn_state->acp_clock_voltage_dependency_table.entries);
+	dyn_state->acp_clock_voltage_dependency_table.entries = NULL;
 }
 
 enum radeon_pcie_gen r600_get_pcie_gen_support(struct radeon_device *rdev,
@@ -1323,9 +1331,9 @@ enum radeon_pcie_gen r600_get_pcie_gen_support(struct radeon_device *rdev,
 	case RADEON_PCIE_GEN3:
 		return RADEON_PCIE_GEN3;
 	default:
-		if ((sys_mask & DRM_PCIE_SPEED_80) && (default_gen == RADEON_PCIE_GEN3))
+		if ((sys_mask & RADEON_PCIE_SPEED_80) && (default_gen == RADEON_PCIE_GEN3))
 			return RADEON_PCIE_GEN3;
-		else if ((sys_mask & DRM_PCIE_SPEED_50) && (default_gen == RADEON_PCIE_GEN2))
+		else if ((sys_mask & RADEON_PCIE_SPEED_50) && (default_gen == RADEON_PCIE_GEN2))
 			return RADEON_PCIE_GEN2;
 		else
 			return RADEON_PCIE_GEN1;
@@ -1358,7 +1366,9 @@ u16 r600_get_pcie_lane_support(struct radeon_device *rdev,
 
 u8 r600_encode_pci_lane_width(u32 lanes)
 {
-	u8 encoded_lanes[] = { 0, 1, 2, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6 };
+	static const u8 encoded_lanes[] = {
+		0, 1, 2, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6
+	};
 
 	if (lanes > 16)
 		return 0;

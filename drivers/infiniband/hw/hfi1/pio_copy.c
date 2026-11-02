@@ -1,48 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2015, 2016 Intel Corporation.
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  - Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  - Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  - Neither the name of Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
 
 #include "hfi.h"
@@ -55,6 +13,7 @@
 
 /**
  * pio_copy - copy data block to MMIO space
+ * @dd: hfi1 dev data
  * @pbuf: a number of blocks allocated within a PIO send context
  * @pbc: PBC to send
  * @from: source, must be 8 byte aligned
@@ -129,8 +88,8 @@ void pio_copy(struct hfi1_devdata *dd, struct pio_buf *pbuf, u64 pbc,
 				dest += sizeof(u64);
 			}
 
-			dest -= pbuf->size;
-			dend -= pbuf->size;
+			dest -= pbuf->sc->size;
+			dend -= pbuf->sc->size;
 		}
 
 		/* write 8-byte non-SOP, non-wrap chunk data */
@@ -165,9 +124,6 @@ void pio_copy(struct hfi1_devdata *dd, struct pio_buf *pbuf, u64 pbc,
 	preempt_enable();
 }
 
-/* USE_SHIFTS is faster in user-space tests on a Xeon X5570 @ 2.93GHz */
-#define USE_SHIFTS 1
-#ifdef USE_SHIFTS
 /*
  * Handle carry bytes using shifts and masks.
  *
@@ -187,37 +143,54 @@ void pio_copy(struct hfi1_devdata *dd, struct pio_buf *pbuf, u64 pbc,
 #define mshift(x) (8 * (x))
 
 /*
- * Read nbytes bytes from "from" and return them in the LSB bytes
- * of pbuf->carry.  Other bytes are zeroed.  Any previous value
- * pbuf->carry is lost.
+ * Jump copy - no-loop copy for < 8 bytes.
+ */
+static inline void jcopy(u8 *dest, const u8 *src, u32 n)
+{
+	switch (n) {
+	case 7:
+		*dest++ = *src++;
+		fallthrough;
+	case 6:
+		*dest++ = *src++;
+		fallthrough;
+	case 5:
+		*dest++ = *src++;
+		fallthrough;
+	case 4:
+		*dest++ = *src++;
+		fallthrough;
+	case 3:
+		*dest++ = *src++;
+		fallthrough;
+	case 2:
+		*dest++ = *src++;
+		fallthrough;
+	case 1:
+		*dest++ = *src++;
+	}
+}
+
+/*
+ * Read nbytes from "from" and place them in the low bytes
+ * of pbuf->carry.  Other bytes are left as-is.  Any previous
+ * value in pbuf->carry is lost.
  *
  * NOTES:
  * o do not read from from if nbytes is zero
- * o from may _not_ be u64 aligned
- * o nbytes must not span a QW boundary
+ * o from may _not_ be u64 aligned.
  */
 static inline void read_low_bytes(struct pio_buf *pbuf, const void *from,
 				  unsigned int nbytes)
 {
-	unsigned long off;
-
-	if (nbytes == 0) {
-		pbuf->carry.val64 = 0;
-	} else {
-		/* align our pointer */
-		off = (unsigned long)from & 0x7;
-		from = (void *)((unsigned long)from & ~0x7l);
-		pbuf->carry.val64 = ((*(u64 *)from)
-				<< zshift(nbytes + off))/* zero upper bytes */
-				>> zshift(nbytes);	/* place at bottom */
-	}
+	pbuf->carry.val64 = 0;
+	jcopy(&pbuf->carry.val8[0], from, nbytes);
 	pbuf->carry_bytes = nbytes;
 }
 
 /*
- * Read nbytes bytes from "from" and put them at the next significant bytes
- * of pbuf->carry.  Unused bytes are zeroed.  It is expected that the extra
- * read does not overfill carry.
+ * Read nbytes bytes from "from" and put them at the end of pbuf->carry.
+ * It is expected that the extra read does not overfill carry.
  *
  * NOTES:
  * o from may _not_ be u64 aligned
@@ -226,55 +199,8 @@ static inline void read_low_bytes(struct pio_buf *pbuf, const void *from,
 static inline void read_extra_bytes(struct pio_buf *pbuf,
 				    const void *from, unsigned int nbytes)
 {
-	unsigned long off = (unsigned long)from & 0x7;
-	unsigned int room, xbytes;
-
-	/* align our pointer */
-	from = (void *)((unsigned long)from & ~0x7l);
-
-	/* check count first - don't read anything if count is zero */
-	while (nbytes) {
-		/* find the number of bytes in this u64 */
-		room = 8 - off;	/* this u64 has room for this many bytes */
-		xbytes = min(room, nbytes);
-
-		/*
-		 * shift down to zero lower bytes, shift up to zero upper
-		 * bytes, shift back down to move into place
-		 */
-		pbuf->carry.val64 |= (((*(u64 *)from)
-					>> mshift(off))
-					<< zshift(xbytes))
-					>> zshift(xbytes + pbuf->carry_bytes);
-		off = 0;
-		pbuf->carry_bytes += xbytes;
-		nbytes -= xbytes;
-		from += sizeof(u64);
-	}
-}
-
-/*
- * Zero extra bytes from the end of pbuf->carry.
- *
- * NOTES:
- * o zbytes <= old_bytes
- */
-static inline void zero_extra_bytes(struct pio_buf *pbuf, unsigned int zbytes)
-{
-	unsigned int remaining;
-
-	if (zbytes == 0)	/* nothing to do */
-		return;
-
-	remaining = pbuf->carry_bytes - zbytes;	/* remaining bytes */
-
-	/* NOTE: zshift only guaranteed to work if remaining != 0 */
-	if (remaining)
-		pbuf->carry.val64 = (pbuf->carry.val64 << zshift(remaining))
-					>> zshift(remaining);
-	else
-		pbuf->carry.val64 = 0;
-	pbuf->carry_bytes = remaining;
+	jcopy(&pbuf->carry.val8[pbuf->carry_bytes], from, nbytes);
+	pbuf->carry_bytes += nbytes;
 }
 
 /*
@@ -322,126 +248,6 @@ static inline int carry_write8(struct pio_buf *pbuf, void __iomem *dest)
 
 	return 0;
 }
-
-#else /* USE_SHIFTS */
-/*
- * Handle carry bytes using byte copies.
- *
- * NOTE: the value the unused portion of carry is left uninitialized.
- */
-
-/*
- * Jump copy - no-loop copy for < 8 bytes.
- */
-static inline void jcopy(u8 *dest, const u8 *src, u32 n)
-{
-	switch (n) {
-	case 7:
-		*dest++ = *src++;
-	case 6:
-		*dest++ = *src++;
-	case 5:
-		*dest++ = *src++;
-	case 4:
-		*dest++ = *src++;
-	case 3:
-		*dest++ = *src++;
-	case 2:
-		*dest++ = *src++;
-	case 1:
-		*dest++ = *src++;
-	}
-}
-
-/*
- * Read nbytes from "from" and and place them in the low bytes
- * of pbuf->carry.  Other bytes are left as-is.  Any previous
- * value in pbuf->carry is lost.
- *
- * NOTES:
- * o do not read from from if nbytes is zero
- * o from may _not_ be u64 aligned.
- */
-static inline void read_low_bytes(struct pio_buf *pbuf, const void *from,
-				  unsigned int nbytes)
-{
-	jcopy(&pbuf->carry.val8[0], from, nbytes);
-	pbuf->carry_bytes = nbytes;
-}
-
-/*
- * Read nbytes bytes from "from" and put them at the end of pbuf->carry.
- * It is expected that the extra read does not overfill carry.
- *
- * NOTES:
- * o from may _not_ be u64 aligned
- * o nbytes may span a QW boundary
- */
-static inline void read_extra_bytes(struct pio_buf *pbuf,
-				    const void *from, unsigned int nbytes)
-{
-	jcopy(&pbuf->carry.val8[pbuf->carry_bytes], from, nbytes);
-	pbuf->carry_bytes += nbytes;
-}
-
-/*
- * Zero extra bytes from the end of pbuf->carry.
- *
- * We do not care about the value of unused bytes in carry, so just
- * reduce the byte count.
- *
- * NOTES:
- * o zbytes <= old_bytes
- */
-static inline void zero_extra_bytes(struct pio_buf *pbuf, unsigned int zbytes)
-{
-	pbuf->carry_bytes -= zbytes;
-}
-
-/*
- * Write a quad word using parts of pbuf->carry and the next 8 bytes of src.
- * Put the unused part of the next 8 bytes of src into the low bytes of
- * pbuf->carry.
- */
-static inline void merge_write8(
-	struct pio_buf *pbuf,
-	void *dest,
-	const void *src)
-{
-	u32 remainder = 8 - pbuf->carry_bytes;
-
-	jcopy(&pbuf->carry.val8[pbuf->carry_bytes], src, remainder);
-	writeq(pbuf->carry.val64, dest);
-	jcopy(&pbuf->carry.val8[0], src + remainder, pbuf->carry_bytes);
-}
-
-/*
- * Write a quad word using all bytes of carry.
- */
-static inline void carry8_write8(union mix carry, void *dest)
-{
-	writeq(carry.val64, dest);
-}
-
-/*
- * Write a quad word using all the valid bytes of carry.  If carry
- * has zero valid bytes, nothing is written.
- * Returns 0 on nothing written, non-zero on quad word written.
- */
-static inline int carry_write8(struct pio_buf *pbuf, void *dest)
-{
-	if (pbuf->carry_bytes) {
-		u64 zero = 0;
-
-		jcopy(&pbuf->carry.val8[pbuf->carry_bytes], (u8 *)&zero,
-		      8 - pbuf->carry_bytes);
-		writeq(pbuf->carry.val64, dest);
-		return 1;
-	}
-
-	return 0;
-}
-#endif /* USE_SHIFTS */
 
 /*
  * Segmented PIO Copy - start
@@ -513,8 +319,8 @@ void seg_pio_copy_start(struct pio_buf *pbuf, u64 pbc,
 				dest += sizeof(u64);
 			}
 
-			dest -= pbuf->size;
-			dend -= pbuf->size;
+			dest -= pbuf->sc->size;
+			dend -= pbuf->sc->size;
 		}
 
 		/* write 8-byte non-SOP, non-wrap chunk data */
@@ -550,8 +356,8 @@ static void mid_copy_mix(struct pio_buf *pbuf, const void *from, size_t nbytes)
 {
 	void __iomem *dest = pbuf->start + (pbuf->qw_written * sizeof(u64));
 	void __iomem *dend;			/* 8-byte data end */
-	unsigned long qw_to_write = (pbuf->carry_bytes + nbytes) >> 3;
-	unsigned long bytes_left = (pbuf->carry_bytes + nbytes) & 0x7;
+	unsigned long qw_to_write = nbytes >> 3;
+	unsigned long bytes_left = nbytes & 0x7;
 
 	/* calculate 8-byte data end */
 	dend = dest + (qw_to_write * sizeof(u64));
@@ -610,8 +416,8 @@ static void mid_copy_mix(struct pio_buf *pbuf, const void *from, size_t nbytes)
 			dest += sizeof(u64);
 		}
 
-		dest -= pbuf->size;
-		dend -= pbuf->size;
+		dest -= pbuf->sc->size;
+		dend -= pbuf->sc->size;
 	}
 
 	/* write 8-byte non-SOP, non-wrap chunk data */
@@ -621,16 +427,46 @@ static void mid_copy_mix(struct pio_buf *pbuf, const void *from, size_t nbytes)
 		dest += sizeof(u64);
 	}
 
-	/* adjust carry */
-	if (pbuf->carry_bytes < bytes_left) {
-		/* need to read more */
-		read_extra_bytes(pbuf, from, bytes_left - pbuf->carry_bytes);
-	} else {
-		/* remove invalid bytes */
-		zero_extra_bytes(pbuf, pbuf->carry_bytes - bytes_left);
-	}
-
 	pbuf->qw_written += qw_to_write;
+
+	/* handle carry and left-over bytes */
+	if (pbuf->carry_bytes + bytes_left >= 8) {
+		unsigned long nread;
+
+		/* there is enough to fill another qw - fill carry */
+		nread = 8 - pbuf->carry_bytes;
+		read_extra_bytes(pbuf, from, nread);
+
+		/*
+		 * One more write - but need to make sure dest is correct.
+		 * Check for wrap and the possibility the write
+		 * should be in SOP space.
+		 *
+		 * The two checks immediately below cannot both be true, hence
+		 * the else. If we have wrapped, we cannot still be within the
+		 * first block. Conversely, if we are still in the first block,
+		 * we cannot have wrapped. We do the wrap check first as that
+		 * is more likely.
+		 */
+		/* adjust if we have wrapped */
+		if (dest >= pbuf->end)
+			dest -= pbuf->sc->size;
+		/* jump to the SOP range if within the first block */
+		else if (pbuf->qw_written < PIO_BLOCK_QWS)
+			dest += SOP_DISTANCE;
+
+		/* flush out full carry */
+		carry8_write8(pbuf->carry, dest);
+		pbuf->qw_written++;
+
+		/* now adjust and read the rest of the bytes into carry */
+		bytes_left -= nread;
+		from += nread; /* from is now not aligned */
+		read_low_bytes(pbuf, from, bytes_left);
+	} else {
+		/* not enough to fill another qw, append the rest to carry */
+		read_extra_bytes(pbuf, from, bytes_left);
+	}
 }
 
 /*
@@ -706,8 +542,8 @@ static void mid_copy_straight(struct pio_buf *pbuf,
 			dest += sizeof(u64);
 		}
 
-		dest -= pbuf->size;
-		dend -= pbuf->size;
+		dest -= pbuf->sc->size;
+		dend -= pbuf->sc->size;
 	}
 
 	/* write 8-byte non-SOP, non-wrap chunk data */
@@ -771,6 +607,9 @@ void seg_pio_copy_mid(struct pio_buf *pbuf, const void *from, size_t nbytes)
 			read_extra_bytes(pbuf, from, to_fill);
 			from += to_fill;
 			nbytes -= to_fill;
+			/* may not be enough valid bytes left to align */
+			if (extra > nbytes)
+				extra = nbytes;
 
 			/* ...now write carry */
 			dest = pbuf->start + (pbuf->qw_written * sizeof(u64));
@@ -785,7 +624,7 @@ void seg_pio_copy_mid(struct pio_buf *pbuf, const void *from, size_t nbytes)
 			 */
 			/* adjust if we've wrapped */
 			if (dest >= pbuf->end)
-				dest -= pbuf->size;
+				dest -= pbuf->sc->size;
 			/* jump to SOP range if within the first block */
 			else if (pbuf->qw_written < PIO_BLOCK_QWS)
 				dest += SOP_DISTANCE;
@@ -798,6 +637,15 @@ void seg_pio_copy_mid(struct pio_buf *pbuf, const void *from, size_t nbytes)
 			read_low_bytes(pbuf, from, extra);
 			from += extra;
 			nbytes -= extra;
+			/*
+			 * If no bytes are left, return early - we are done.
+			 * NOTE: This short-circuit is *required* because
+			 * "extra" may have been reduced in size and "from"
+			 * is not aligned, as required when leaving this
+			 * if block.
+			 */
+			if (nbytes == 0)
+				return;
 		}
 
 		/* at this point, from is QW aligned */
@@ -829,7 +677,7 @@ void seg_pio_copy_end(struct pio_buf *pbuf)
 	 */
 	/* adjust if we have wrapped */
 	if (dest >= pbuf->end)
-		dest -= pbuf->size;
+		dest -= pbuf->sc->size;
 	/* jump to the SOP range if within the first block */
 	else if (pbuf->qw_written < PIO_BLOCK_QWS)
 		dest += SOP_DISTANCE;

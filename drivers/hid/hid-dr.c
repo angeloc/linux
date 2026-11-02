@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Force feedback support for DragonRise Inc. game controllers
  *
@@ -12,19 +13,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/input.h>
@@ -83,23 +71,26 @@ static int drff_play(struct input_dev *dev, void *data,
 	return 0;
 }
 
-static int drff_init(struct hid_device *hid)
+static int dr_input_configured(struct hid_device *hid, struct hid_input *hidinput)
 {
 	struct drff_device *drff;
 	struct hid_report *report;
-	struct hid_input *hidinput = list_first_entry(&hid->inputs,
-						struct hid_input, list);
 	struct list_head *report_list =
 			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
 	struct input_dev *dev = hidinput->input;
 	int error;
 
-	if (list_empty(report_list)) {
+	if (!list_is_first(&hidinput->list, &hid->inputs))
+		return 0;
+
+	if (hid->product != 0x0006)
+		return 0;
+
+	report = list_first_entry_or_null(report_list, struct hid_report, list);
+	if (!report) {
 		hid_err(hid, "no output reports found\n");
 		return -ENODEV;
 	}
-
-	report = list_first_entry(report_list, struct hid_report, list);
 	if (report->maxfield < 1) {
 		hid_err(hid, "no fields in the report\n");
 		return -ENODEV;
@@ -110,10 +101,11 @@ static int drff_init(struct hid_device *hid)
 		return -ENODEV;
 	}
 
-	drff = kzalloc(sizeof(struct drff_device), GFP_KERNEL);
+	drff = kzalloc_obj(struct drff_device);
 	if (!drff)
 		return -ENOMEM;
 
+	drff->report = report;
 	set_bit(FF_RUMBLE, dev->ffbit);
 
 	error = input_ff_create_memless(dev, drff, drff_play);
@@ -122,7 +114,6 @@ static int drff_init(struct hid_device *hid)
 		return error;
 	}
 
-	drff->report = report;
 	drff->report->field[0]->value[0] = 0xf3;
 	drff->report->field[0]->value[1] = 0x00;
 	drff->report->field[0]->value[2] = 0x00;
@@ -138,7 +129,8 @@ static int drff_init(struct hid_device *hid)
 	return 0;
 }
 #else
-static inline int drff_init(struct hid_device *hid)
+static inline int dr_input_configured(struct hid_device *hid,
+				      struct hid_input *hidinput)
 {
 	return 0;
 }
@@ -205,7 +197,7 @@ static inline int drff_init(struct hid_device *hid)
 #define PID0011_RDESC_ORIG_SIZE	101
 
 /* Fixed report descriptor for PID 0x011 joystick */
-static __u8 pid0011_rdesc_fixed[] = {
+static const __u8 pid0011_rdesc_fixed[] = {
 	0x05, 0x01,         /*  Usage Page (Desktop),           */
 	0x09, 0x04,         /*  Usage (Joystick),               */
 	0xA1, 0x01,         /*  Collection (Application),       */
@@ -234,115 +226,47 @@ static __u8 pid0011_rdesc_fixed[] = {
 	0xC0                /*  End Collection                  */
 };
 
-static __u8 pid0006_rdesc_fixed[] = {
-	0x05, 0x01,        /* Usage Page (Generic Desktop)	*/
-	0x09, 0x04,        /* Usage (Joystick)			*/
-	0xA1, 0x01,        /* Collection (Application)		*/
-	0xA1, 0x02,        /*   Collection (Logical)		*/
-	0x75, 0x08,        /*     Report Size (8)		*/
-	0x95, 0x05,        /*     Report Count (5)		*/
-	0x15, 0x00,        /*     Logical Minimum (0)		*/
-	0x26, 0xFF, 0x00,  /*     Logical Maximum (255)		*/
-	0x35, 0x00,        /*     Physical Minimum (0)		*/
-	0x46, 0xFF, 0x00,  /*     Physical Maximum (255)	*/
-	0x09, 0x30,        /*     Usage (X)			*/
-	0x09, 0x33,        /*     Usage (Ry)			*/
-	0x09, 0x32,        /*     Usage (Z)			*/
-	0x09, 0x31,        /*     Usage (Y)			*/
-	0x09, 0x34,        /*     Usage (Ry)			*/
-	0x81, 0x02,        /*     Input (Variable)		*/
-	0x75, 0x04,        /*     Report Size (4)		*/
-	0x95, 0x01,        /*     Report Count (1)		*/
-	0x25, 0x07,        /*     Logical Maximum (7)		*/
-	0x46, 0x3B, 0x01,  /*     Physical Maximum (315)	*/
-	0x65, 0x14,        /*     Unit (Centimeter)		*/
-	0x09, 0x39,        /*     Usage (Hat switch)		*/
-	0x81, 0x42,        /*     Input (Variable)		*/
-	0x65, 0x00,        /*     Unit (None)			*/
-	0x75, 0x01,        /*     Report Size (1)		*/
-	0x95, 0x0C,        /*     Report Count (12)		*/
-	0x25, 0x01,        /*     Logical Maximum (1)		*/
-	0x45, 0x01,        /*     Physical Maximum (1)		*/
-	0x05, 0x09,        /*     Usage Page (Button)		*/
-	0x19, 0x01,        /*     Usage Minimum (0x01)		*/
-	0x29, 0x0C,        /*     Usage Maximum (0x0C)		*/
-	0x81, 0x02,        /*     Input (Variable)		*/
-	0x06, 0x00, 0xFF,  /*     Usage Page (Vendor Defined)	*/
-	0x75, 0x01,        /*     Report Size (1)		*/
-	0x95, 0x08,        /*     Report Count (8)		*/
-	0x25, 0x01,        /*     Logical Maximum (1)		*/
-	0x45, 0x01,        /*     Physical Maximum (1)		*/
-	0x09, 0x01,        /*     Usage (0x01)			*/
-	0x81, 0x02,        /*     Input (Variable)		*/
-	0xC0,              /*   End Collection			*/
-	0xA1, 0x02,        /*   Collection (Logical)		*/
-	0x75, 0x08,        /*     Report Size (8)		*/
-	0x95, 0x07,        /*     Report Count (7)		*/
-	0x46, 0xFF, 0x00,  /*     Physical Maximum (255)	*/
-	0x26, 0xFF, 0x00,  /*     Logical Maximum (255)		*/
-	0x09, 0x02,        /*     Usage (0x02)			*/
-	0x91, 0x02,        /*     Output (Variable)		*/
-	0xC0,              /*   End Collection			*/
-	0xC0               /* End Collection			*/
-};
-
-static __u8 *dr_report_fixup(struct hid_device *hdev, __u8 *rdesc,
-				unsigned int *rsize)
+static const __u8 *dr_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+				   unsigned int *rsize)
 {
 	switch (hdev->product) {
 	case 0x0011:
 		if (*rsize == PID0011_RDESC_ORIG_SIZE) {
-			rdesc = pid0011_rdesc_fixed;
 			*rsize = sizeof(pid0011_rdesc_fixed);
-		}
-		break;
-	case 0x0006:
-		if (*rsize == sizeof(pid0006_rdesc_fixed)) {
-			rdesc = pid0006_rdesc_fixed;
-			*rsize = sizeof(pid0006_rdesc_fixed);
+			return pid0011_rdesc_fixed;
 		}
 		break;
 	}
 	return rdesc;
 }
 
-static int dr_probe(struct hid_device *hdev, const struct hid_device_id *id)
+#define map_abs(c)      hid_map_usage(hi, usage, bit, max, EV_ABS, (c))
+#define map_rel(c)      hid_map_usage(hi, usage, bit, max, EV_REL, (c))
+
+static int dr_input_mapping(struct hid_device *hdev, struct hid_input *hi,
+			    struct hid_field *field, struct hid_usage *usage,
+			    unsigned long **bit, int *max)
 {
-	int ret;
-
-	dev_dbg(&hdev->dev, "DragonRise Inc. HID hardware probe...");
-
-	ret = hid_parse(hdev);
-	if (ret) {
-		hid_err(hdev, "parse failed\n");
-		goto err;
-	}
-
-	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT & ~HID_CONNECT_FF);
-	if (ret) {
-		hid_err(hdev, "hw start failed\n");
-		goto err;
-	}
-
-	switch (hdev->product) {
-	case 0x0006:
-		ret = drff_init(hdev);
-		if (ret) {
-			dev_err(&hdev->dev, "force feedback init failed\n");
-			hid_hw_stop(hdev);
-			goto err;
-		}
-		break;
+	switch (usage->hid) {
+	/*
+	 * revert to the old hid-input behavior where axes
+	 * can be randomly assigned when hid->usage is reused.
+	 */
+	case HID_GD_X: case HID_GD_Y: case HID_GD_Z:
+	case HID_GD_RX: case HID_GD_RY: case HID_GD_RZ:
+		if (field->flags & HID_MAIN_ITEM_RELATIVE)
+			map_rel(usage->hid & 0xf);
+		else
+			map_abs(usage->hid & 0xf);
+		return 1;
 	}
 
 	return 0;
-err:
-	return ret;
 }
 
 static const struct hid_device_id dr_devices[] = {
-	{ HID_USB_DEVICE(USB_VENDOR_ID_DRAGONRISE, 0x0006),  },
-	{ HID_USB_DEVICE(USB_VENDOR_ID_DRAGONRISE, 0x0011),  },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_DRAGONRISE, 0x0006), },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_DRAGONRISE, 0x0011), },
 	{ }
 };
 MODULE_DEVICE_TABLE(hid, dr_devices);
@@ -351,8 +275,10 @@ static struct hid_driver dr_driver = {
 	.name = "dragonrise",
 	.id_table = dr_devices,
 	.report_fixup = dr_report_fixup,
-	.probe = dr_probe,
+	.input_mapping = dr_input_mapping,
+	.input_configured = dr_input_configured,
 };
 module_hid_driver(dr_driver);
 
+MODULE_DESCRIPTION("Force feedback support for DragonRise Inc. game controllers");
 MODULE_LICENSE("GPL");

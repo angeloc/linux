@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Linux NET3:	IP/IP protocol decoder.
  *
@@ -16,12 +17,6 @@
  *              Carlos Picoto   :       GRE over IP support
  *		Alexey Kuznetsov:	Reworked. Really, now it is truncated version of ipv4/ip_gre.c.
  *					I do not want to merge them together.
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
- *
  */
 
 /* tunnel.c: an IP tunnel driver
@@ -96,7 +91,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <linux/in.h>
@@ -115,63 +110,91 @@
 #include <net/xfrm.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
+#include <net/dst_metadata.h>
 
 static bool log_ecn_error = true;
 module_param(log_ecn_error, bool, 0644);
 MODULE_PARM_DESC(log_ecn_error, "Log packets received with corrupted ECN");
 
-static int ipip_net_id __read_mostly;
+static unsigned int ipip_net_id __read_mostly;
 
 static int ipip_tunnel_init(struct net_device *dev);
 static struct rtnl_link_ops ipip_link_ops __read_mostly;
 
 static int ipip_err(struct sk_buff *skb, u32 info)
 {
-
-/* All the routers (except for Linux) return only
-   8 bytes of packet payload. It means, that precise relaying of
-   ICMP in the real Internet is absolutely infeasible.
- */
+	/* All the routers (except for Linux) return only
+	 * 8 bytes of packet payload. It means, that precise relaying of
+	 * ICMP in the real Internet is absolutely infeasible.
+	 */
 	struct net *net = dev_net(skb->dev);
 	struct ip_tunnel_net *itn = net_generic(net, ipip_net_id);
 	const struct iphdr *iph = (const struct iphdr *)skb->data;
-	struct ip_tunnel *t;
-	int err;
+	IP_TUNNEL_DECLARE_FLAGS(flags) = { };
 	const int type = icmp_hdr(skb)->type;
 	const int code = icmp_hdr(skb)->code;
+	struct ip_tunnel *t;
+	int err = 0;
 
-	err = -ENOENT;
-	t = ip_tunnel_lookup(itn, skb->dev->ifindex, TUNNEL_NO_KEY,
-			     iph->daddr, iph->saddr, 0);
-	if (!t)
+	__set_bit(IP_TUNNEL_NO_KEY_BIT, flags);
+
+	t = ip_tunnel_lookup(itn, skb->dev->ifindex, flags, iph->daddr,
+			     iph->saddr, 0);
+	if (!t) {
+		err = -ENOENT;
 		goto out;
+	}
+
+	switch (type) {
+	case ICMP_DEST_UNREACH:
+		switch (code) {
+		case ICMP_SR_FAILED:
+			/* Impossible event. */
+			goto out;
+		default:
+			/* All others are translated to HOST_UNREACH.
+			 * rfc2003 contains "deep thoughts" about NET_UNREACH,
+			 * I believe they are just ether pollution. --ANK
+			 */
+			break;
+		}
+		break;
+
+	case ICMP_TIME_EXCEEDED:
+		if (code != ICMP_EXC_TTL)
+			goto out;
+		break;
+
+	case ICMP_REDIRECT:
+		break;
+
+	default:
+		goto out;
+	}
 
 	if (type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED) {
-		ipv4_update_pmtu(skb, dev_net(skb->dev), info,
-				 t->parms.link, 0, iph->protocol, 0);
-		err = 0;
+		ipv4_update_pmtu(skb, net, info, t->parms.link, iph->protocol);
 		goto out;
 	}
 
 	if (type == ICMP_REDIRECT) {
-		ipv4_redirect(skb, dev_net(skb->dev), t->parms.link, 0,
-			      iph->protocol, 0);
-		err = 0;
+		ipv4_redirect(skb, net, t->parms.link, iph->protocol);
 		goto out;
 	}
 
-	if (t->parms.iph.daddr == 0)
+	if (t->parms.iph.daddr == 0) {
+		err = -ENOENT;
 		goto out;
+	}
 
-	err = 0;
 	if (t->parms.iph.ttl == 0 && type == ICMP_TIME_EXCEEDED)
 		goto out;
 
-	if (time_before(jiffies, t->err_time + IPTUNNEL_ERR_TIMEO))
-		t->err_count++;
+	if (time_before(jiffies, READ_ONCE(t->err_time) + IPTUNNEL_ERR_TIMEO))
+		WRITE_ONCE(t->err_count, READ_ONCE(t->err_count) + 1);
 	else
-		t->err_count = 1;
-	t->err_time = jiffies;
+		WRITE_ONCE(t->err_count, 1);
+	WRITE_ONCE(t->err_time, jiffies);
 
 out:
 	return err;
@@ -193,12 +216,16 @@ static int ipip_tunnel_rcv(struct sk_buff *skb, u8 ipproto)
 {
 	struct net *net = dev_net(skb->dev);
 	struct ip_tunnel_net *itn = net_generic(net, ipip_net_id);
+	IP_TUNNEL_DECLARE_FLAGS(flags) = { };
+	struct metadata_dst *tun_dst = NULL;
 	struct ip_tunnel *tunnel;
 	const struct iphdr *iph;
 
+	__set_bit(IP_TUNNEL_NO_KEY_BIT, flags);
+
 	iph = ip_hdr(skb);
-	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, TUNNEL_NO_KEY,
-			iph->saddr, iph->daddr, 0);
+	tunnel = ip_tunnel_lookup(itn, skb->dev->ifindex, flags, iph->saddr,
+				  iph->daddr, 0);
 	if (tunnel) {
 		const struct tnl_ptk_info *tpi;
 
@@ -216,7 +243,17 @@ static int ipip_tunnel_rcv(struct sk_buff *skb, u8 ipproto)
 			tpi = &ipip_tpi;
 		if (iptunnel_pull_header(skb, 0, tpi->proto, false))
 			goto drop;
-		return ip_tunnel_rcv(tunnel, skb, tpi, NULL, log_ecn_error);
+		if (tunnel->collect_md) {
+			ip_tunnel_flags_zero(flags);
+
+			tun_dst = ip_tun_rx_dst(skb, flags, 0, 0);
+			if (!tun_dst)
+				goto drop;
+			ip_tunnel_md_udp_encap(skb, &tun_dst->u.tun_info);
+		}
+		skb_reset_mac_header(skb);
+
+		return ip_tunnel_rcv(tunnel, skb, tpi, tun_dst, log_ecn_error);
 	}
 
 	return -1;
@@ -249,6 +286,9 @@ static netdev_tx_t ipip_tunnel_xmit(struct sk_buff *skb,
 	const struct iphdr  *tiph = &tunnel->parms.iph;
 	u8 ipproto;
 
+	if (!pskb_inet_may_pull(skb))
+		goto tx_error;
+
 	switch (skb->protocol) {
 	case htons(ETH_P_IP):
 		ipproto = IPPROTO_IPIP;
@@ -270,13 +310,16 @@ static netdev_tx_t ipip_tunnel_xmit(struct sk_buff *skb,
 
 	skb_set_inner_ipproto(skb, ipproto);
 
-	ip_tunnel_xmit(skb, dev, tiph, ipproto);
+	if (tunnel->collect_md)
+		ip_md_tunnel_xmit(skb, dev, ipproto, 0);
+	else
+		ip_tunnel_xmit(skb, dev, tiph, ipproto);
 	return NETDEV_TX_OK;
 
 tx_error:
 	kfree_skb(skb);
 
-	dev->stats.tx_errors++;
+	DEV_STATS_INC(dev, tx_errors);
 	return NETDEV_TX_OK;
 }
 
@@ -295,29 +338,52 @@ static bool ipip_tunnel_ioctl_verify_protocol(u8 ipproto)
 }
 
 static int
-ipip_tunnel_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+ipip_tunnel_ctl(struct net_device *dev, struct ip_tunnel_parm_kern *p, int cmd)
 {
-	int err = 0;
-	struct ip_tunnel_parm p;
-
-	if (copy_from_user(&p, ifr->ifr_ifru.ifru_data, sizeof(p)))
-		return -EFAULT;
-
 	if (cmd == SIOCADDTUNNEL || cmd == SIOCCHGTUNNEL) {
-		if (p.iph.version != 4 ||
-		    !ipip_tunnel_ioctl_verify_protocol(p.iph.protocol) ||
-		    p.iph.ihl != 5 || (p.iph.frag_off&htons(~IP_DF)))
+		if (p->iph.version != 4 ||
+		    !ipip_tunnel_ioctl_verify_protocol(p->iph.protocol) ||
+		    p->iph.ihl != 5 || (p->iph.frag_off & htons(~IP_DF)))
 			return -EINVAL;
 	}
 
-	p.i_key = p.o_key = 0;
-	p.i_flags = p.o_flags = 0;
-	err = ip_tunnel_ioctl(dev, &p, cmd);
-	if (err)
-		return err;
+	p->i_key = p->o_key = 0;
+	ip_tunnel_flags_zero(p->i_flags);
+	ip_tunnel_flags_zero(p->o_flags);
+	return ip_tunnel_ctl(dev, p, cmd);
+}
 
-	if (copy_to_user(ifr->ifr_ifru.ifru_data, &p, sizeof(p)))
-		return -EFAULT;
+static int ipip_fill_forward_path(struct net_device_path_ctx *ctx,
+				  struct net_device_path *path)
+{
+	struct ip_tunnel *tunnel = netdev_priv(ctx->dev);
+	const struct iphdr *tiph = &tunnel->parms.iph;
+	struct rtable *rt;
+
+	if (ctx->ether_type != cpu_to_be16(ETH_P_IP))
+		return -EOPNOTSUPP;
+
+	if (tunnel->collect_md)
+		return -EOPNOTSUPP;
+
+	if (tunnel->parms.iph.tos & 0x1)
+		return -EOPNOTSUPP;
+
+	rt = ip_route_output(dev_net(ctx->dev), tiph->daddr, tiph->saddr,
+			     inet_dsfield_to_dscp(tiph->tos),
+			     tunnel->parms.link, RT_SCOPE_UNIVERSE);
+	if (IS_ERR(rt))
+		return PTR_ERR(rt);
+
+	path->type = DEV_PATH_TUN;
+	path->tun.src_v4.s_addr = tiph->saddr;
+	path->tun.dst_v4.s_addr = tiph->daddr;
+	path->tun.inner_proto = IPPROTO_IPIP;
+	path->tun.encap_proto = AF_INET;
+	path->tun.dst = &rt->dst;
+	path->dev = ctx->dev;
+
+	ctx->dev = rt->dst.dev;
 
 	return 0;
 }
@@ -326,10 +392,12 @@ static const struct net_device_ops ipip_netdev_ops = {
 	.ndo_init       = ipip_tunnel_init,
 	.ndo_uninit     = ip_tunnel_uninit,
 	.ndo_start_xmit	= ipip_tunnel_xmit,
-	.ndo_do_ioctl	= ipip_tunnel_ioctl,
+	.ndo_siocdevprivate = ip_tunnel_siocdevprivate,
 	.ndo_change_mtu = ip_tunnel_change_mtu,
-	.ndo_get_stats64 = ip_tunnel_get_stats64,
+	.ndo_get_stats64 = dev_get_tstats64,
 	.ndo_get_iflink = ip_tunnel_get_iflink,
+	.ndo_tunnel_ctl	= ipip_tunnel_ctl,
+	.ndo_fill_forward_path = ipip_fill_forward_path,
 };
 
 #define IPIP_FEATURES (NETIF_F_SG |		\
@@ -341,11 +409,12 @@ static const struct net_device_ops ipip_netdev_ops = {
 static void ipip_tunnel_setup(struct net_device *dev)
 {
 	dev->netdev_ops		= &ipip_netdev_ops;
+	dev->header_ops		= &ip_tunnel_header_ops;
 
 	dev->type		= ARPHRD_TUNNEL;
 	dev->flags		= IFF_NOARP;
 	dev->addr_len		= 4;
-	dev->features		|= NETIF_F_LLTX;
+	dev->lltx		= true;
 	netif_keep_dst(dev);
 
 	dev->features		|= IPIP_FEATURES;
@@ -357,7 +426,7 @@ static int ipip_tunnel_init(struct net_device *dev)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
 
-	memcpy(dev->dev_addr, &tunnel->parms.iph.saddr, 4);
+	__dev_addr_set(dev, &tunnel->parms.iph.saddr, 4);
 	memcpy(dev->broadcast, &tunnel->parms.iph.daddr, 4);
 
 	tunnel->tun_hlen = 0;
@@ -365,7 +434,8 @@ static int ipip_tunnel_init(struct net_device *dev)
 	return ip_tunnel_init(dev);
 }
 
-static int ipip_tunnel_validate(struct nlattr *tb[], struct nlattr *data[])
+static int ipip_tunnel_validate(struct nlattr *tb[], struct nlattr *data[],
+				struct netlink_ext_ack *extack)
 {
 	u8 proto;
 
@@ -380,115 +450,80 @@ static int ipip_tunnel_validate(struct nlattr *tb[], struct nlattr *data[])
 }
 
 static void ipip_netlink_parms(struct nlattr *data[],
-			       struct ip_tunnel_parm *parms)
+			       struct ip_tunnel_parm_kern *parms,
+			       bool *collect_md, __u32 *fwmark)
 {
 	memset(parms, 0, sizeof(*parms));
 
 	parms->iph.version = 4;
 	parms->iph.protocol = IPPROTO_IPIP;
 	parms->iph.ihl = 5;
+	*collect_md = false;
 
 	if (!data)
 		return;
 
-	if (data[IFLA_IPTUN_LINK])
-		parms->link = nla_get_u32(data[IFLA_IPTUN_LINK]);
+	ip_tunnel_netlink_parms(data, parms);
 
-	if (data[IFLA_IPTUN_LOCAL])
-		parms->iph.saddr = nla_get_in_addr(data[IFLA_IPTUN_LOCAL]);
+	if (data[IFLA_IPTUN_COLLECT_METADATA])
+		*collect_md = true;
 
-	if (data[IFLA_IPTUN_REMOTE])
-		parms->iph.daddr = nla_get_in_addr(data[IFLA_IPTUN_REMOTE]);
-
-	if (data[IFLA_IPTUN_TTL]) {
-		parms->iph.ttl = nla_get_u8(data[IFLA_IPTUN_TTL]);
-		if (parms->iph.ttl)
-			parms->iph.frag_off = htons(IP_DF);
-	}
-
-	if (data[IFLA_IPTUN_TOS])
-		parms->iph.tos = nla_get_u8(data[IFLA_IPTUN_TOS]);
-
-	if (data[IFLA_IPTUN_PROTO])
-		parms->iph.protocol = nla_get_u8(data[IFLA_IPTUN_PROTO]);
-
-	if (!data[IFLA_IPTUN_PMTUDISC] || nla_get_u8(data[IFLA_IPTUN_PMTUDISC]))
-		parms->iph.frag_off = htons(IP_DF);
+	if (data[IFLA_IPTUN_FWMARK])
+		*fwmark = nla_get_u32(data[IFLA_IPTUN_FWMARK]);
 }
 
-/* This function returns true when ENCAP attributes are present in the nl msg */
-static bool ipip_netlink_encap_parms(struct nlattr *data[],
-				     struct ip_tunnel_encap *ipencap)
+static int ipip_newlink(struct net_device *dev,
+			struct rtnl_newlink_params *params,
+			struct netlink_ext_ack *extack)
 {
-	bool ret = false;
-
-	memset(ipencap, 0, sizeof(*ipencap));
-
-	if (!data)
-		return ret;
-
-	if (data[IFLA_IPTUN_ENCAP_TYPE]) {
-		ret = true;
-		ipencap->type = nla_get_u16(data[IFLA_IPTUN_ENCAP_TYPE]);
-	}
-
-	if (data[IFLA_IPTUN_ENCAP_FLAGS]) {
-		ret = true;
-		ipencap->flags = nla_get_u16(data[IFLA_IPTUN_ENCAP_FLAGS]);
-	}
-
-	if (data[IFLA_IPTUN_ENCAP_SPORT]) {
-		ret = true;
-		ipencap->sport = nla_get_be16(data[IFLA_IPTUN_ENCAP_SPORT]);
-	}
-
-	if (data[IFLA_IPTUN_ENCAP_DPORT]) {
-		ret = true;
-		ipencap->dport = nla_get_be16(data[IFLA_IPTUN_ENCAP_DPORT]);
-	}
-
-	return ret;
-}
-
-static int ipip_newlink(struct net *src_net, struct net_device *dev,
-			struct nlattr *tb[], struct nlattr *data[])
-{
-	struct ip_tunnel_parm p;
+	struct ip_tunnel *t = netdev_priv(dev);
+	struct nlattr **data = params->data;
+	struct nlattr **tb = params->tb;
 	struct ip_tunnel_encap ipencap;
+	struct ip_tunnel_parm_kern p;
+	__u32 fwmark = 0;
 
-	if (ipip_netlink_encap_parms(data, &ipencap)) {
-		struct ip_tunnel *t = netdev_priv(dev);
+	if (ip_tunnel_netlink_encap_parms(data, &ipencap)) {
 		int err = ip_tunnel_encap_setup(t, &ipencap);
 
 		if (err < 0)
 			return err;
 	}
 
-	ipip_netlink_parms(data, &p);
-	return ip_tunnel_newlink(dev, tb, &p);
+	ipip_netlink_parms(data, &p, &t->collect_md, &fwmark);
+	return ip_tunnel_newlink(params->link_net ? : dev_net(dev), dev, tb, &p,
+				 fwmark);
 }
 
 static int ipip_changelink(struct net_device *dev, struct nlattr *tb[],
-			   struct nlattr *data[])
+			   struct nlattr *data[],
+			   struct netlink_ext_ack *extack)
 {
-	struct ip_tunnel_parm p;
+	struct ip_tunnel *t = netdev_priv(dev);
 	struct ip_tunnel_encap ipencap;
+	struct ip_tunnel_parm_kern p;
+	bool collect_md;
+	__u32 fwmark = t->fwmark;
 
-	if (ipip_netlink_encap_parms(data, &ipencap)) {
-		struct ip_tunnel *t = netdev_priv(dev);
+	if (!rtnl_dev_link_net_capable(dev, t->net))
+		return -EPERM;
+
+	if (ip_tunnel_netlink_encap_parms(data, &ipencap)) {
 		int err = ip_tunnel_encap_setup(t, &ipencap);
 
 		if (err < 0)
 			return err;
 	}
 
-	ipip_netlink_parms(data, &p);
+	ipip_netlink_parms(data, &p, &collect_md, &fwmark);
+	if (collect_md)
+		return -EINVAL;
 
 	if (((dev->flags & IFF_POINTOPOINT) && !p.iph.daddr) ||
 	    (!(dev->flags & IFF_POINTOPOINT) && p.iph.daddr))
 		return -EINVAL;
 
-	return ip_tunnel_changelink(dev, tb, &p);
+	return ip_tunnel_changelink(dev, tb, &p, fwmark);
 }
 
 static size_t ipip_get_size(const struct net_device *dev)
@@ -516,13 +551,17 @@ static size_t ipip_get_size(const struct net_device *dev)
 		nla_total_size(2) +
 		/* IFLA_IPTUN_ENCAP_DPORT */
 		nla_total_size(2) +
+		/* IFLA_IPTUN_COLLECT_METADATA */
+		nla_total_size(0) +
+		/* IFLA_IPTUN_FWMARK */
+		nla_total_size(4) +
 		0;
 }
 
 static int ipip_fill_info(struct sk_buff *skb, const struct net_device *dev)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
-	struct ip_tunnel_parm *parm = &tunnel->parms;
+	struct ip_tunnel_parm_kern *parm = &tunnel->parms;
 
 	if (nla_put_u32(skb, IFLA_IPTUN_LINK, parm->link) ||
 	    nla_put_in_addr(skb, IFLA_IPTUN_LOCAL, parm->iph.saddr) ||
@@ -531,7 +570,8 @@ static int ipip_fill_info(struct sk_buff *skb, const struct net_device *dev)
 	    nla_put_u8(skb, IFLA_IPTUN_TOS, parm->iph.tos) ||
 	    nla_put_u8(skb, IFLA_IPTUN_PROTO, parm->iph.protocol) ||
 	    nla_put_u8(skb, IFLA_IPTUN_PMTUDISC,
-		       !!(parm->iph.frag_off & htons(IP_DF))))
+		       !!(parm->iph.frag_off & htons(IP_DF))) ||
+	    nla_put_u32(skb, IFLA_IPTUN_FWMARK, tunnel->fwmark))
 		goto nla_put_failure;
 
 	if (nla_put_u16(skb, IFLA_IPTUN_ENCAP_TYPE,
@@ -544,6 +584,9 @@ static int ipip_fill_info(struct sk_buff *skb, const struct net_device *dev)
 			tunnel->encap.flags))
 		goto nla_put_failure;
 
+	if (tunnel->collect_md)
+		if (nla_put_flag(skb, IFLA_IPTUN_COLLECT_METADATA))
+			goto nla_put_failure;
 	return 0;
 
 nla_put_failure:
@@ -562,6 +605,8 @@ static const struct nla_policy ipip_policy[IFLA_IPTUN_MAX + 1] = {
 	[IFLA_IPTUN_ENCAP_FLAGS]	= { .type = NLA_U16 },
 	[IFLA_IPTUN_ENCAP_SPORT]	= { .type = NLA_U16 },
 	[IFLA_IPTUN_ENCAP_DPORT]	= { .type = NLA_U16 },
+	[IFLA_IPTUN_COLLECT_METADATA]	= { .type = NLA_FLAG },
+	[IFLA_IPTUN_FWMARK]		= { .type = NLA_U32 },
 };
 
 static struct rtnl_link_ops ipip_link_ops __read_mostly = {
@@ -598,15 +643,15 @@ static int __net_init ipip_init_net(struct net *net)
 	return ip_tunnel_init_net(net, ipip_net_id, &ipip_link_ops, "tunl0");
 }
 
-static void __net_exit ipip_exit_net(struct net *net)
+static void __net_exit ipip_exit_rtnl(struct net *net,
+				      struct list_head *dev_to_kill)
 {
-	struct ip_tunnel_net *itn = net_generic(net, ipip_net_id);
-	ip_tunnel_delete_net(itn, &ipip_link_ops);
+	ip_tunnel_delete_net(net, ipip_net_id, dev_to_kill);
 }
 
 static struct pernet_operations ipip_net_ops = {
 	.init = ipip_init_net,
-	.exit = ipip_exit_net,
+	.exit_rtnl = ipip_exit_rtnl,
 	.id   = &ipip_net_id,
 	.size = sizeof(struct ip_tunnel_net),
 };
@@ -641,7 +686,7 @@ out:
 
 rtnl_link_failed:
 #if IS_ENABLED(CONFIG_MPLS)
-	xfrm4_tunnel_deregister(&mplsip_handler, AF_INET);
+	xfrm4_tunnel_deregister(&mplsip_handler, AF_MPLS);
 xfrm_tunnel_mplsip_failed:
 
 #endif
@@ -665,6 +710,7 @@ static void __exit ipip_fini(void)
 
 module_init(ipip_init);
 module_exit(ipip_fini);
+MODULE_DESCRIPTION("IP/IP protocol decoder library");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_RTNL_LINK("ipip");
 MODULE_ALIAS_NETDEV("tunl0");

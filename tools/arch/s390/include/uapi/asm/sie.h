@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI_ASM_S390_SIE_H
 #define _UAPI_ASM_S390_SIE_H
 
@@ -28,7 +29,7 @@
 	{ 0x13, "SIGP conditional emergency signal" },		\
 	{ 0x15, "SIGP sense running" },				\
 	{ 0x16, "SIGP set multithreading"},			\
-	{ 0x17, "SIGP store additional status ait address"}
+	{ 0x17, "SIGP store additional status at address"}
 
 #define icpt_prog_codes						\
 	{ 0x0001, "Prog Operation" },				\
@@ -140,6 +141,7 @@
 	exit_code_ipa0(0xB2, 0x4c, "TAR"),	\
 	exit_code_ipa0(0xB2, 0x50, "CSP"),	\
 	exit_code_ipa0(0xB2, 0x54, "MVPG"),	\
+	exit_code_ipa0(0xB2, 0x56, "STHYI"),	\
 	exit_code_ipa0(0xB2, 0x58, "BSG"),	\
 	exit_code_ipa0(0xB2, 0x5a, "BSA"),	\
 	exit_code_ipa0(0xB2, 0x5f, "CHSC"),	\

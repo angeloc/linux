@@ -25,6 +25,79 @@
 #include <core/client.h>
 #include <core/engine.h>
 
+struct nvkm_object *
+nvkm_object_search(struct nvkm_client *client, u64 handle,
+		   const struct nvkm_object_func *func)
+{
+	struct nvkm_object *object;
+	unsigned long flags;
+
+	if (handle) {
+		spin_lock_irqsave(&client->obj_lock, flags);
+		struct rb_node *node = client->objroot.rb_node;
+		while (node) {
+			object = rb_entry(node, typeof(*object), node);
+			if (handle < object->object)
+				node = node->rb_left;
+			else
+			if (handle > object->object)
+				node = node->rb_right;
+			else {
+				spin_unlock_irqrestore(&client->obj_lock, flags);
+				goto done;
+			}
+		}
+		spin_unlock_irqrestore(&client->obj_lock, flags);
+		return ERR_PTR(-ENOENT);
+	} else {
+		object = &client->object;
+	}
+
+done:
+	if (unlikely(func && object->func != func))
+		return ERR_PTR(-EINVAL);
+	return object;
+}
+
+void
+nvkm_object_remove(struct nvkm_object *object)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&object->client->obj_lock, flags);
+	if (!RB_EMPTY_NODE(&object->node))
+		rb_erase(&object->node, &object->client->objroot);
+	spin_unlock_irqrestore(&object->client->obj_lock, flags);
+}
+
+bool
+nvkm_object_insert(struct nvkm_object *object)
+{
+	struct rb_node **ptr;
+	struct rb_node *parent = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&object->client->obj_lock, flags);
+	ptr = &object->client->objroot.rb_node;
+	while (*ptr) {
+		struct nvkm_object *this = rb_entry(*ptr, typeof(*this), node);
+		parent = *ptr;
+		if (object->object < this->object) {
+			ptr = &parent->rb_left;
+		} else if (object->object > this->object) {
+			ptr = &parent->rb_right;
+		} else {
+			spin_unlock_irqrestore(&object->client->obj_lock, flags);
+			return false;
+		}
+	}
+
+	rb_link_node(&object->node, parent, ptr);
+	rb_insert_color(&object->node, &object->client->objroot);
+	spin_unlock_irqrestore(&object->client->obj_lock, flags);
+	return true;
+}
+
 int
 nvkm_object_mthd(struct nvkm_object *object, u32 mthd, void *data, u32 size)
 {
@@ -43,58 +116,19 @@ nvkm_object_ntfy(struct nvkm_object *object, u32 mthd,
 }
 
 int
-nvkm_object_map(struct nvkm_object *object, u64 *addr, u32 *size)
+nvkm_object_map(struct nvkm_object *object, void *argv, u32 argc,
+		enum nvkm_object_map *type, u64 *addr, u64 *size)
 {
 	if (likely(object->func->map))
-		return object->func->map(object, addr, size);
+		return object->func->map(object, argv, argc, type, addr, size);
 	return -ENODEV;
 }
 
 int
-nvkm_object_rd08(struct nvkm_object *object, u64 addr, u8 *data)
+nvkm_object_unmap(struct nvkm_object *object)
 {
-	if (likely(object->func->rd08))
-		return object->func->rd08(object, addr, data);
-	return -ENODEV;
-}
-
-int
-nvkm_object_rd16(struct nvkm_object *object, u64 addr, u16 *data)
-{
-	if (likely(object->func->rd16))
-		return object->func->rd16(object, addr, data);
-	return -ENODEV;
-}
-
-int
-nvkm_object_rd32(struct nvkm_object *object, u64 addr, u32 *data)
-{
-	if (likely(object->func->rd32))
-		return object->func->rd32(object, addr, data);
-	return -ENODEV;
-}
-
-int
-nvkm_object_wr08(struct nvkm_object *object, u64 addr, u8 data)
-{
-	if (likely(object->func->wr08))
-		return object->func->wr08(object, addr, data);
-	return -ENODEV;
-}
-
-int
-nvkm_object_wr16(struct nvkm_object *object, u64 addr, u16 data)
-{
-	if (likely(object->func->wr16))
-		return object->func->wr16(object, addr, data);
-	return -ENODEV;
-}
-
-int
-nvkm_object_wr32(struct nvkm_object *object, u64 addr, u32 data)
-{
-	if (likely(object->func->wr32))
-		return object->func->wr32(object, addr, data);
+	if (likely(object->func->unmap))
+		return object->func->unmap(object);
 	return -ENODEV;
 }
 
@@ -108,16 +142,28 @@ nvkm_object_bind(struct nvkm_object *object, struct nvkm_gpuobj *gpuobj,
 }
 
 int
-nvkm_object_fini(struct nvkm_object *object, bool suspend)
+nvkm_object_fini(struct nvkm_object *object, enum nvkm_suspend_state suspend)
 {
-	const char *action = suspend ? "suspend" : "fini";
+	const char *action;
 	struct nvkm_object *child;
 	s64 time;
 	int ret;
 
+	switch (suspend) {
+	case NVKM_POWEROFF:
+	default:
+		action = "fini";
+		break;
+	case NVKM_SUSPEND:
+		action = "suspend";
+		break;
+	case NVKM_RUNTIME_SUSPEND:
+		action = "runtime";
+		break;
+	}
 	nvif_debug(object, "%s children...\n", action);
 	time = ktime_to_us(ktime_get());
-	list_for_each_entry(child, &object->tree, head) {
+	list_for_each_entry_reverse(child, &object->tree, head) {
 		ret = nvkm_object_fini(child, suspend);
 		if (ret && suspend)
 			goto fail_child;
@@ -178,11 +224,11 @@ nvkm_object_init(struct nvkm_object *object)
 
 fail_child:
 	list_for_each_entry_continue_reverse(child, &object->tree, head)
-		nvkm_object_fini(child, false);
+		nvkm_object_fini(child, NVKM_POWEROFF);
 fail:
 	nvif_error(object, "init failed with %d\n", ret);
 	if (object->func->fini)
-		object->func->fini(object, false);
+		object->func->fini(object, NVKM_POWEROFF);
 	return ret;
 }
 
@@ -200,6 +246,7 @@ nvkm_object_dtor(struct nvkm_object *object)
 	}
 
 	nvif_debug(object, "destroy running...\n");
+	nvkm_object_unmap(object);
 	if (object->func->dtor)
 		data = object->func->dtor(object);
 	nvkm_engine_unref(&object->engine);
@@ -214,7 +261,7 @@ nvkm_object_del(struct nvkm_object **pobject)
 	struct nvkm_object *object = *pobject;
 	if (object && !WARN_ON(!object->func)) {
 		*pobject = nvkm_object_dtor(object);
-		nvkm_client_remove(object->client, object);
+		nvkm_object_remove(object);
 		list_del(&object->head);
 		kfree(*pobject);
 		*pobject = NULL;
@@ -230,10 +277,11 @@ nvkm_object_ctor(const struct nvkm_object_func *func,
 	object->engine = nvkm_engine_ref(oclass->engine);
 	object->oclass = oclass->base.oclass;
 	object->handle = oclass->handle;
+	object->object = oclass->object;
 	INIT_LIST_HEAD(&object->head);
 	INIT_LIST_HEAD(&object->tree);
 	RB_CLEAR_NODE(&object->node);
-	WARN_ON(oclass->engine && !object->engine);
+	WARN_ON(IS_ERR(object->engine));
 }
 
 int
@@ -242,7 +290,7 @@ nvkm_object_new_(const struct nvkm_object_func *func,
 		 struct nvkm_object **pobject)
 {
 	if (size == 0) {
-		if (!(*pobject = kzalloc(sizeof(**pobject), GFP_KERNEL)))
+		if (!(*pobject = kzalloc_obj(**pobject)))
 			return -ENOMEM;
 		nvkm_object_ctor(func, oclass, *pobject);
 		return 0;

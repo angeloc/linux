@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*  linux/include/linux/clockchips.h
  *
  *  This file contains the structure definitions for clockchips.
@@ -11,7 +12,7 @@
 #ifdef CONFIG_GENERIC_CLOCKEVENTS
 
 # include <linux/clocksource.h>
-# include <linux/cpumask.h>
+# include <linux/cpumask_types.h>
 # include <linux/ktime.h>
 # include <linux/notifier.h>
 
@@ -42,9 +43,9 @@ enum clock_event_state {
 /*
  * Clock event features
  */
-# define CLOCK_EVT_FEAT_PERIODIC	0x000001
-# define CLOCK_EVT_FEAT_ONESHOT		0x000002
-# define CLOCK_EVT_FEAT_KTIME		0x000004
+# define CLOCK_EVT_FEAT_PERIODIC		0x000001
+# define CLOCK_EVT_FEAT_ONESHOT			0x000002
+# define CLOCK_EVT_FEAT_CLOCKSOURCE_COUPLED	0x000004
 
 /*
  * x86(64) specific (mis)features:
@@ -72,6 +73,7 @@ enum clock_event_state {
  *			level handler of the event source
  * @set_next_event:	set next event function using a clocksource delta
  * @set_next_ktime:	set next event function using a direct ktime value
+ * @set_next_coupled:	set next event function for clocksource coupled mode
  * @next_event:		local storage for the next event in oneshot mode
  * @max_delta_ns:	maximum delta value in ns
  * @min_delta_ns:	minimum delta value in ns
@@ -79,6 +81,8 @@ enum clock_event_state {
  * @shift:		nanoseconds to cycles divisor (power of two)
  * @state_use_accessors:current state of the device, assigned by the core code
  * @features:		features
+ * @cs_id:		Clocksource ID to denote the clocksource for coupled mode
+ * @next_event_forced:	True if the last programming was a forced event
  * @retries:		number of forced programming retries
  * @set_state_periodic:	switch state to periodic
  * @set_state_oneshot:	switch state to oneshot
@@ -100,6 +104,7 @@ struct clock_event_device {
 	void			(*event_handler)(struct clock_event_device *);
 	int			(*set_next_event)(unsigned long evt, struct clock_event_device *);
 	int			(*set_next_ktime)(ktime_t expires, struct clock_event_device *);
+	void			(*set_next_coupled)(u64 cycles, struct clock_event_device *);
 	ktime_t			next_event;
 	u64			max_delta_ns;
 	u64			min_delta_ns;
@@ -107,6 +112,8 @@ struct clock_event_device {
 	u32			shift;
 	enum clock_event_state	state_use_accessors;
 	unsigned int		features;
+	enum clocksource_ids	cs_id;
+	unsigned int		next_event_forced;
 	unsigned long		retries;
 
 	int			(*set_state_periodic)(struct clock_event_device *);
@@ -182,7 +189,6 @@ extern u64 clockevent_delta2ns(unsigned long latch, struct clock_event_device *e
 extern void clockevents_register_device(struct clock_event_device *dev);
 extern int clockevents_unbind_device(struct clock_event_device *ced, int cpu);
 
-extern void clockevents_config(struct clock_event_device *dev, u32 freq);
 extern void clockevents_config_and_register(struct clock_event_device *dev,
 					    u32 freq, unsigned long min_delta,
 					    unsigned long max_delta);
@@ -211,7 +217,7 @@ extern int tick_receive_broadcast(void);
 extern void tick_setup_hrtimer_broadcast(void);
 extern int tick_check_broadcast_expired(void);
 # else
-static inline int tick_check_broadcast_expired(void) { return 0; }
+static __always_inline int tick_check_broadcast_expired(void) { return 0; }
 static inline void tick_setup_hrtimer_broadcast(void) { }
 # endif
 
@@ -219,7 +225,7 @@ static inline void tick_setup_hrtimer_broadcast(void) { }
 
 static inline void clockevents_suspend(void) { }
 static inline void clockevents_resume(void) { }
-static inline int tick_check_broadcast_expired(void) { return 0; }
+static __always_inline int tick_check_broadcast_expired(void) { return 0; }
 static inline void tick_setup_hrtimer_broadcast(void) { }
 
 #endif /* !CONFIG_GENERIC_CLOCKEVENTS */

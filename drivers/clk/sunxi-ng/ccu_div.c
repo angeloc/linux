@@ -1,36 +1,48 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2016 Maxime Ripard
  * Maxime Ripard <maxime.ripard@free-electrons.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
  */
 
 #include <linux/clk-provider.h>
+#include <linux/io.h>
 
 #include "ccu_gate.h"
 #include "ccu_div.h"
 
-static unsigned long ccu_div_round_rate(struct ccu_mux_internal *mux,
-					unsigned long parent_rate,
-					unsigned long rate,
-					void *data)
+static int ccu_div_determine_rate_helper(struct ccu_mux_internal *mux,
+					 struct clk_rate_request *req,
+					 void *data)
 {
 	struct ccu_div *cd = data;
-	unsigned long val;
+	int ret;
 
-	/*
-	 * We can't use divider_round_rate that assumes that there's
-	 * several parents, while we might be called to evaluate
-	 * several different parents.
-	 */
-	val = divider_get_val(rate, parent_rate, cd->div.table, cd->div.width,
-			      cd->div.flags);
+	if (cd->common.features & CCU_FEATURE_FIXED_POSTDIV)
+		req->rate *= cd->fixed_post_div;
 
-	return divider_recalc_rate(&cd->common.hw, parent_rate, val,
-				   cd->div.table, cd->div.flags);
+	if (cd->div.flags & CLK_DIVIDER_READ_ONLY) {
+		unsigned long val;
+		u32 reg;
+
+		reg = readl(cd->common.base + cd->common.reg);
+		val = reg >> cd->div.shift;
+		val &= (1 << cd->div.width) - 1;
+
+		ret = divider_ro_determine_rate(&cd->common.hw, req, cd->div.table,
+						cd->div.width, cd->div.flags, val);
+
+	} else {
+		ret = divider_determine_rate(&cd->common.hw, req, cd->div.table,
+					     cd->div.width, cd->div.flags);
+	}
+
+	if (ret)
+		return ret;
+
+	if (cd->common.features & CCU_FEATURE_FIXED_POSTDIV)
+		req->rate /= cd->fixed_post_div;
+
+	return 0;
 }
 
 static void ccu_div_disable(struct clk_hw *hw)
@@ -65,11 +77,16 @@ static unsigned long ccu_div_recalc_rate(struct clk_hw *hw,
 	val = reg >> cd->div.shift;
 	val &= (1 << cd->div.width) - 1;
 
-	ccu_mux_helper_adjust_parent_for_prediv(&cd->common, &cd->mux, -1,
-						&parent_rate);
+	parent_rate = ccu_mux_helper_apply_prediv(&cd->common, &cd->mux, -1,
+						  parent_rate);
 
-	return divider_recalc_rate(hw, parent_rate, val, cd->div.table,
-				   cd->div.flags);
+	val = divider_recalc_rate(hw, parent_rate, val, cd->div.table,
+				  cd->div.flags, cd->div.width);
+
+	if (cd->common.features & CCU_FEATURE_FIXED_POSTDIV)
+		val /= cd->fixed_post_div;
+
+	return val;
 }
 
 static int ccu_div_determine_rate(struct clk_hw *hw,
@@ -78,7 +95,7 @@ static int ccu_div_determine_rate(struct clk_hw *hw,
 	struct ccu_div *cd = hw_to_ccu_div(hw);
 
 	return ccu_mux_helper_determine_rate(&cd->common, &cd->mux,
-					     req, ccu_div_round_rate, cd);
+					     req, ccu_div_determine_rate_helper, cd);
 }
 
 static int ccu_div_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -89,8 +106,11 @@ static int ccu_div_set_rate(struct clk_hw *hw, unsigned long rate,
 	unsigned long val;
 	u32 reg;
 
-	ccu_mux_helper_adjust_parent_for_prediv(&cd->common, &cd->mux, -1,
-						&parent_rate);
+	parent_rate = ccu_mux_helper_apply_prediv(&cd->common, &cd->mux, -1,
+						  parent_rate);
+
+	if (cd->common.features & CCU_FEATURE_FIXED_POSTDIV)
+		rate *= cd->fixed_post_div;
 
 	val = divider_get_val(rate, parent_rate, cd->div.table, cd->div.width,
 			      cd->div.flags);
@@ -99,6 +119,8 @@ static int ccu_div_set_rate(struct clk_hw *hw, unsigned long rate,
 
 	reg = readl(cd->common.base + cd->common.reg);
 	reg &= ~GENMASK(cd->div.width + cd->div.shift - 1, cd->div.shift);
+	if (cd->common.features & CCU_FEATURE_UPDATE_BIT)
+		reg |= CCU_SUNXI_UPDATE_BIT;
 
 	writel(reg | (val << cd->div.shift),
 	       cd->common.base + cd->common.reg);
@@ -134,3 +156,17 @@ const struct clk_ops ccu_div_ops = {
 	.recalc_rate	= ccu_div_recalc_rate,
 	.set_rate	= ccu_div_set_rate,
 };
+EXPORT_SYMBOL_NS_GPL(ccu_div_ops, "SUNXI_CCU");
+
+const struct clk_ops ccu_rodiv_ops = {
+	.disable	= ccu_div_disable,
+	.enable		= ccu_div_enable,
+	.is_enabled	= ccu_div_is_enabled,
+
+	.get_parent	= ccu_div_get_parent,
+	.set_parent	= ccu_div_set_parent,
+
+	.determine_rate	= ccu_div_determine_rate,
+	.recalc_rate	= ccu_div_recalc_rate,
+};
+EXPORT_SYMBOL_NS_GPL(ccu_rodiv_ops, "SUNXI_CCU");

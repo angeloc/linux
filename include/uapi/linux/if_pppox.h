@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note */
 /***************************************************************************
  * Linux PPP over X - Generic PPP transport layer sockets
  * Linux PPP over Ethernet (PPPoE) Socket Implementation (RFC 2516) 
@@ -21,8 +22,11 @@
 #include <asm/byteorder.h>
 
 #include <linux/socket.h>
+#include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_pppol2tp.h>
+#include <linux/in.h>
+#include <linux/in6.h>
 
 /* For user-space programs to pick up these definitions
  * which they wouldn't get otherwise without defining __KERNEL__
@@ -99,16 +103,6 @@ struct sockaddr_pppol2tpv3in6 {
 	struct pppol2tpv3in6_addr pppol2tp;
 } __packed;
 
-/*********************************************************************
- *
- * ioctl interface for defining forwarding of connections
- *
- ********************************************************************/
-
-#define PPPOEIOCSFWD	_IOW(0xB1 ,0, size_t)
-#define PPPOEIOCDFWD	_IO(0xB1 ,1)
-/*#define PPPOEIOCGFWD	_IOWR(0xB1,2, size_t)*/
-
 /* Codes to identify message types */
 #define PADI_CODE	0x09
 #define PADO_CODE	0x07
@@ -118,7 +112,9 @@ struct sockaddr_pppol2tpv3in6 {
 struct pppoe_tag {
 	__be16 tag_type;
 	__be16 tag_len;
-	char tag_data[0];
+#ifndef __KERNEL__
+	char tag_data[];
+#endif
 } __attribute__ ((packed));
 
 /* Tag identifiers */
@@ -146,7 +142,9 @@ struct pppoe_hdr {
 	__u8 code;
 	__be16 sid;
 	__be16 length;
-	struct pppoe_tag tag[0];
+#ifndef __KERNEL__
+	struct pppoe_tag tag[];
+#endif
 } __packed;
 
 /* Length of entire PPPoE + PPP header */

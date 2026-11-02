@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * w1_ds2431.c - w1 family 2d (DS2431) driver
  *
  * Copyright (c) 2008 Bernhard Weirich <bernhard.weirich@riedel.net>
  *
  * Heavily inspired by w1_DS2433 driver from Ben Gardner <bgardner@wabtec.com>
- *
- * This source code is licensed under the GNU General Public License,
- * Version 2. See the file COPYING for more details.
  */
 
 #include <linux/kernel.h>
@@ -16,9 +14,9 @@
 #include <linux/types.h>
 #include <linux/delay.h>
 
-#include "../w1.h"
-#include "../w1_int.h"
-#include "../w1_family.h"
+#include <linux/w1.h>
+
+#define W1_EEPROM_DS2431	0x2D
 
 #define W1_F2D_EEPROM_SIZE		128
 #define W1_F2D_PAGE_COUNT		4
@@ -97,7 +95,7 @@ static int w1_f2d_readblock(struct w1_slave *sl, int off, int count, char *buf)
 }
 
 static ssize_t eeprom_read(struct file *filp, struct kobject *kobj,
-			   struct bin_attribute *bin_attr, char *buf,
+			   const struct bin_attribute *bin_attr, char *buf,
 			   loff_t off, size_t count)
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
@@ -203,7 +201,7 @@ retry:
 }
 
 static ssize_t eeprom_write(struct file *filp, struct kobject *kobj,
-			    struct bin_attribute *bin_attr, char *buf,
+			    const struct bin_attribute *bin_attr, char *buf,
 			    loff_t off, size_t count)
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
@@ -264,9 +262,9 @@ out_up:
 	return count;
 }
 
-static BIN_ATTR_RW(eeprom, W1_F2D_EEPROM_SIZE);
+static const BIN_ATTR_RW(eeprom, W1_F2D_EEPROM_SIZE);
 
-static struct bin_attribute *w1_f2d_bin_attrs[] = {
+static const struct bin_attribute *const w1_f2d_bin_attrs[] = {
 	&bin_attr_eeprom,
 	NULL,
 };
@@ -280,7 +278,7 @@ static const struct attribute_group *w1_f2d_groups[] = {
 	NULL,
 };
 
-static struct w1_family_ops w1_f2d_fops = {
+static const struct w1_family_ops w1_f2d_fops = {
 	.groups		= w1_f2d_groups,
 };
 
@@ -290,7 +288,7 @@ static struct w1_family w1_family_2d = {
 };
 module_w1_family(w1_family_2d);
 
-MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Bernhard Weirich <bernhard.weirich@riedel.net>");
 MODULE_DESCRIPTION("w1 family 2d driver for DS2431, 1kb EEPROM");
+MODULE_LICENSE("GPL");
 MODULE_ALIAS("w1-family-" __stringify(W1_EEPROM_DS2431));

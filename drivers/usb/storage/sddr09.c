@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Driver for SanDisk SDDR-09 SmartMedia reader
  *
@@ -11,20 +12,6 @@
  * been programmed to obey a certain limited set of SCSI commands.
  * This driver translates the "real" SCSI commands to the SDDR-09 SCSI
  * commands.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /*
@@ -60,6 +47,7 @@
 MODULE_DESCRIPTION("Driver for SanDisk SDDR-09 SmartMedia reader");
 MODULE_AUTHOR("Andries Brouwer <aeb@cwi.nl>, Robert Baruch <autophile@starband.net>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("USB_STORAGE");
 
 static int usb_stor_sddr09_dpcm_init(struct us_data *us);
 static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us);
@@ -75,7 +63,7 @@ static int usb_stor_sddr09_init(struct us_data *us);
 { USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
   .driver_info = (flags) }
 
-static struct usb_device_id sddr09_usb_ids[] = {
+static const struct usb_device_id sddr09_usb_ids[] = {
 #	include "unusual_sddr09.h"
 	{ }		/* Terminating entry */
 };
@@ -97,7 +85,7 @@ MODULE_DEVICE_TABLE(usb, sddr09_usb_ids);
 	.initFunction = init_function,	\
 }
 
-static struct us_unusual_dev sddr09_unusual_dev_list[] = {
+static const struct us_unusual_dev sddr09_unusual_dev_list[] = {
 #	include "unusual_sddr09.h"
 	{ }		/* Terminating entry */
 };
@@ -156,7 +144,7 @@ static inline char *nand_flash_manufacturer(int manuf_id) {
  * 256 MB NAND flash has a 5-byte ID with 2nd byte 0xaa, 0xba, 0xca or 0xda.
  */
 
-static struct nand_flash_dev nand_flash_ids[] = {
+static const struct nand_flash_dev nand_flash_ids[] = {
 	/* NAND flash */
 	{ 0x6e, 20, 8, 4, 8, 2},	/* 1 MB */
 	{ 0xe8, 20, 8, 4, 8, 2},	/* 1 MB */
@@ -181,7 +169,7 @@ static struct nand_flash_dev nand_flash_ids[] = {
 	{ 0,}
 };
 
-static struct nand_flash_dev *
+static const struct nand_flash_dev *
 nand_find_id(unsigned char id) {
 	int i;
 
@@ -764,12 +752,10 @@ sddr09_read_data(struct us_data *us,
 	// a bounce buffer and move the data a piece at a time between the
 	// bounce buffer and the actual transfer buffer.
 
-	len = min(sectors, (unsigned int) info->blocksize) * info->pagesize;
+	len = min_t(unsigned int, sectors, info->blocksize) * info->pagesize;
 	buffer = kmalloc(len, GFP_NOIO);
-	if (buffer == NULL) {
-		printk(KERN_WARNING "sddr09_read_data: Out of memory\n");
+	if (!buffer)
 		return -ENOMEM;
-	}
 
 	// This could be made much more efficient by checking for
 	// contiguous LBA's. Another exercise left to the student.
@@ -872,13 +858,12 @@ sddr09_write_lba(struct us_data *us, unsigned int lba,
 	unsigned int pagelen;
 	unsigned char *bptr, *cptr, *xptr;
 	unsigned char ecc[3];
-	int i, result, isnew;
+	int i, result;
 
 	lbap = ((lba % 1000) << 1) | 0x1000;
 	if (parity[MSB_of(lbap) ^ LSB_of(lbap)])
 		lbap ^= 1;
 	pba = info->lba_to_pba[lba];
-	isnew = 0;
 
 	if (pba == UNDEF) {
 		pba = sddr09_find_unused_pba(info, lba);
@@ -889,7 +874,6 @@ sddr09_write_lba(struct us_data *us, unsigned int lba,
 		}
 		info->pba_to_lba[pba] = lba;
 		info->lba_to_pba[lba] = pba;
-		isnew = 1;
 	}
 
 	if (pba == 1) {
@@ -1004,10 +988,8 @@ sddr09_write_data(struct us_data *us,
 	pagelen = (1 << info->pageshift) + (1 << CONTROL_SHIFT);
 	blocklen = (pagelen << info->blockshift);
 	blockbuffer = kmalloc(blocklen, GFP_NOIO);
-	if (!blockbuffer) {
-		printk(KERN_WARNING "sddr09_write_data: Out of memory\n");
+	if (!blockbuffer)
 		return -ENOMEM;
-	}
 
 	/*
 	 * Since we don't write the user data directly to the device,
@@ -1015,10 +997,9 @@ sddr09_write_data(struct us_data *us,
 	 * at a time between the bounce buffer and the actual transfer buffer.
 	 */
 
-	len = min(sectors, (unsigned int) info->blocksize) * info->pagesize;
+	len = min_t(unsigned int, sectors, info->blocksize) * info->pagesize;
 	buffer = kmalloc(len, GFP_NOIO);
-	if (buffer == NULL) {
-		printk(KERN_WARNING "sddr09_write_data: Out of memory\n");
+	if (!buffer) {
 		kfree(blockbuffer);
 		return -ENOMEM;
 	}
@@ -1152,9 +1133,9 @@ sddr09_reset(struct us_data *us) {
 }
 #endif
 
-static struct nand_flash_dev *
+static const struct nand_flash_dev *
 sddr09_get_cardinfo(struct us_data *us, unsigned char flags) {
-	struct nand_flash_dev *cardinfo;
+	const struct nand_flash_dev *cardinfo;
 	unsigned char deviceID[4];
 	char blurbtxt[256];
 	int result;
@@ -1241,8 +1222,7 @@ sddr09_read_map(struct us_data *us) {
 	alloc_blocks = min(numblocks, SDDR09_READ_MAP_BUFSZ >> CONTROL_SHIFT);
 	alloc_len = (alloc_blocks << CONTROL_SHIFT);
 	buffer = kmalloc(alloc_len, GFP_NOIO);
-	if (buffer == NULL) {
-		printk(KERN_WARNING "sddr09_read_map: out of memory\n");
+	if (!buffer) {
 		result = -1;
 		goto done;
 	}
@@ -1252,8 +1232,8 @@ sddr09_read_map(struct us_data *us) {
 
 	kfree(info->lba_to_pba);
 	kfree(info->pba_to_lba);
-	info->lba_to_pba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
-	info->pba_to_lba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
+	info->lba_to_pba = kmalloc_objs(int, numblocks, GFP_NOIO);
+	info->pba_to_lba = kmalloc_objs(int, numblocks, GFP_NOIO);
 
 	if (info->lba_to_pba == NULL || info->pba_to_lba == NULL) {
 		printk(KERN_WARNING "sddr09_read_map: out of memory\n");
@@ -1359,6 +1339,15 @@ sddr09_read_map(struct us_data *us) {
 
 		lba += 1000*(i/0x400);
 
+		/* The LBA comes from the card and may exceed the table size */
+		if (lba >= numblocks) {
+			dev_warn_ratelimited(&us->pusb_dev->dev,
+					"sddr09: Bad LBA %d for block %d exceeds the translation table size %d\n",
+					lba, i, numblocks);
+			info->pba_to_lba[i] = UNUSABLE;
+			continue;
+		}
+
 		if (info->lba_to_pba[lba] != UNDEF) {
 			printk(KERN_WARNING
 			       "sddr09: LBA %d seen for PBA %d and %d\n",
@@ -1448,7 +1437,7 @@ sddr09_common_init(struct us_data *us) {
 		return -EINVAL;
 	}
 
-	us->extra = kzalloc(sizeof(struct sddr09_card_info), GFP_NOIO);
+	us->extra = kzalloc_obj(struct sddr09_card_info, GFP_NOIO);
 	if (!us->extra)
 		return -ENOMEM;
 	us->extra_destructor = sddr09_card_info_destructor;
@@ -1565,12 +1554,12 @@ static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us)
 
 	struct sddr09_card_info *info;
 
-	static unsigned char inquiry_response[8] = {
+	static const unsigned char inquiry_response[8] = {
 		0x00, 0x80, 0x00, 0x02, 0x1F, 0x00, 0x00, 0x00
 	};
 
 	/* note: no block descriptor support */
-	static unsigned char mode_page_01[19] = {
+	static const unsigned char mode_page_01[19] = {
 		0x00, 0x0F, 0x00, 0x0, 0x0, 0x0, 0x00,
 		0x01, 0x0A,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -1604,7 +1593,7 @@ static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us)
 	}
 
 	if (srb->cmnd[0] == READ_CAPACITY) {
-		struct nand_flash_dev *cardinfo;
+		const struct nand_flash_dev *cardinfo;
 
 		sddr09_get_wp(us, info);	/* read WP bit */
 

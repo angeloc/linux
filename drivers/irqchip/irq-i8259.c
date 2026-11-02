@@ -38,6 +38,7 @@ static void disable_8259A_irq(struct irq_data *d);
 static void enable_8259A_irq(struct irq_data *d);
 static void mask_and_ack_8259A(struct irq_data *d);
 static void init_8259A(int auto_eoi);
+static int (*i8259_poll)(void) = i8259_irq;
 
 static struct irq_chip i8259A_chip = {
 	.name			= "XT-PIC",
@@ -50,6 +51,11 @@ static struct irq_chip i8259A_chip = {
 /*
  * 8259A PIC functions to handle ISA devices:
  */
+
+void i8259_set_poll(int (*poll)(void))
+{
+	i8259_poll = poll;
+}
 
 /*
  * This contains the irq mask for both 8259A irq controllers,
@@ -87,24 +93,6 @@ static void enable_8259A_irq(struct irq_data *d)
 	else
 		outb(cached_master_mask, PIC_MASTER_IMR);
 	raw_spin_unlock_irqrestore(&i8259A_lock, flags);
-}
-
-int i8259A_irq_pending(unsigned int irq)
-{
-	unsigned int mask;
-	unsigned long flags;
-	int ret;
-
-	irq -= I8259A_IRQ_BASE;
-	mask = 1 << irq;
-	raw_spin_lock_irqsave(&i8259A_lock, flags);
-	if (irq < 8)
-		ret = inb(PIC_MASTER_CMD) & mask;
-	else
-		ret = inb(PIC_SLAVE_CMD) & (mask >> 8);
-	raw_spin_unlock_irqrestore(&i8259A_lock, flags);
-
-	return ret;
 }
 
 void make_8259A_irq(unsigned int irq)
@@ -214,13 +202,13 @@ spurious_8259A_irq:
 	}
 }
 
-static void i8259A_resume(void)
+static void i8259A_resume(void *data)
 {
 	if (i8259A_auto_eoi >= 0)
 		init_8259A(i8259A_auto_eoi);
 }
 
-static void i8259A_shutdown(void)
+static void i8259A_shutdown(void *data)
 {
 	/* Put the i8259A into a quiescent state that
 	 * the kernel initialization code can get it
@@ -232,18 +220,14 @@ static void i8259A_shutdown(void)
 	}
 }
 
-static struct syscore_ops i8259_syscore_ops = {
+static const struct syscore_ops i8259_syscore_ops = {
 	.resume = i8259A_resume,
 	.shutdown = i8259A_shutdown,
 };
 
-static int __init i8259A_init_sysfs(void)
-{
-	register_syscore_ops(&i8259_syscore_ops);
-	return 0;
-}
-
-device_initcall(i8259A_init_sysfs);
+static struct syscore i8259_syscore = {
+	.ops = &i8259_syscore_ops,
+};
 
 static void init_8259A(int auto_eoi)
 {
@@ -288,27 +272,18 @@ static void init_8259A(int auto_eoi)
 	raw_spin_unlock_irqrestore(&i8259A_lock, flags);
 }
 
-/*
- * IRQ2 is cascade interrupt to second interrupt controller
- */
-static struct irqaction irq2 = {
-	.handler = no_action,
-	.name = "cascade",
-	.flags = IRQF_NO_THREAD,
-};
-
 static struct resource pic1_io_resource = {
 	.name = "pic1",
 	.start = PIC_MASTER_CMD,
 	.end = PIC_MASTER_IMR,
-	.flags = IORESOURCE_BUSY
+	.flags = IORESOURCE_IO | IORESOURCE_BUSY
 };
 
 static struct resource pic2_io_resource = {
 	.name = "pic2",
 	.start = PIC_SLAVE_CMD,
 	.end = PIC_SLAVE_IMR,
-	.flags = IORESOURCE_BUSY
+	.flags = IORESOURCE_IO | IORESOURCE_BUSY
 };
 
 static int i8259A_irq_domain_map(struct irq_domain *d, unsigned int virq,
@@ -319,7 +294,7 @@ static int i8259A_irq_domain_map(struct irq_domain *d, unsigned int virq,
 	return 0;
 }
 
-static struct irq_domain_ops i8259A_ops = {
+static const struct irq_domain_ops i8259A_ops = {
 	.map = i8259A_irq_domain_map,
 	.xlate = irq_domain_xlate_onecell,
 };
@@ -331,6 +306,10 @@ static struct irq_domain_ops i8259A_ops = {
  */
 struct irq_domain * __init __init_i8259_irqs(struct device_node *node)
 {
+	/*
+	 * PIC_CASCADE_IR is cascade interrupt to second interrupt controller
+	 */
+	int irq = I8259A_IRQ_BASE + PIC_CASCADE_IR;
 	struct irq_domain *domain;
 
 	insert_resource(&ioport_resource, &pic1_io_resource);
@@ -338,12 +317,14 @@ struct irq_domain * __init __init_i8259_irqs(struct device_node *node)
 
 	init_8259A(0);
 
-	domain = irq_domain_add_legacy(node, 16, I8259A_IRQ_BASE, 0,
-				       &i8259A_ops, NULL);
+	domain = irq_domain_create_legacy(of_fwnode_handle(node), 16, I8259A_IRQ_BASE, 0,
+					  &i8259A_ops, NULL);
 	if (!domain)
 		panic("Failed to add i8259 IRQ domain");
 
-	setup_irq(I8259A_IRQ_BASE + PIC_CASCADE_IR, &irq2);
+	if (request_irq(irq, no_action, IRQF_NO_THREAD, "cascade", NULL))
+		pr_err("Failed to register cascade interrupt\n");
+	register_syscore(&i8259_syscore);
 	return domain;
 }
 
@@ -355,28 +336,28 @@ void __init init_i8259_irqs(void)
 static void i8259_irq_dispatch(struct irq_desc *desc)
 {
 	struct irq_domain *domain = irq_desc_get_handler_data(desc);
-	int hwirq = i8259_irq();
-	unsigned int irq;
+	int hwirq = i8259_poll();
 
 	if (hwirq < 0)
 		return;
 
-	irq = irq_linear_revmap(domain, hwirq);
-	generic_handle_irq(irq);
+	generic_handle_domain_irq(domain, hwirq);
 }
 
-int __init i8259_of_init(struct device_node *node, struct device_node *parent)
+static int __init i8259_of_init(struct device_node *node, struct device_node *parent)
 {
 	struct irq_domain *domain;
 	unsigned int parent_irq;
 
+	domain = __init_i8259_irqs(node);
+
 	parent_irq = irq_of_parse_and_map(node, 0);
 	if (!parent_irq) {
 		pr_err("Failed to map i8259 parent IRQ\n");
+		irq_domain_remove(domain);
 		return -ENODEV;
 	}
 
-	domain = __init_i8259_irqs(node);
 	irq_set_chained_handler_and_data(parent_irq, i8259_irq_dispatch,
 					 domain);
 	return 0;

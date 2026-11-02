@@ -1,4 +1,4 @@
-#include <libunwind.h>
+// SPDX-License-Identifier: GPL-2.0
 #include <stdlib.h>
 
 extern int UNW_OBJ(dwarf_search_unwind_table) (unw_addr_space_t as,

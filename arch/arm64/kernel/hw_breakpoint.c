@@ -1,21 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * HW_breakpoint: a unified kernel/user-space hardware breakpoint facility,
  * using the CPU's debug registers.
  *
  * Copyright (C) 2012 ARM Limited
  * Author: Will Deacon <will.deacon@arm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #define pr_fmt(fmt) "hw-breakpoint: " fmt
@@ -28,10 +17,13 @@
 #include <linux/perf_event.h>
 #include <linux/ptrace.h>
 #include <linux/smp.h>
+#include <linux/uaccess.h>
 
-#include <asm/compat.h>
 #include <asm/current.h>
+#include <asm/daifflags.h>
 #include <asm/debug-monitors.h>
+#include <asm/esr.h>
+#include <asm/exception.h>
 #include <asm/hw_breakpoint.h>
 #include <asm/traps.h>
 #include <asm/cputype.h>
@@ -62,7 +54,7 @@ int hw_breakpoint_slots(int type)
 	case TYPE_DATA:
 		return get_num_wrps();
 	default:
-		pr_warning("unknown slot type: %d\n", type);
+		pr_warn("unknown slot type: %d\n", type);
 		return 0;
 	}
 }
@@ -123,7 +115,7 @@ static u64 read_wb_reg(int reg, int n)
 	GEN_READ_WB_REG_CASES(AARCH64_DBG_REG_WVR, AARCH64_DBG_REG_NAME_WVR, val);
 	GEN_READ_WB_REG_CASES(AARCH64_DBG_REG_WCR, AARCH64_DBG_REG_NAME_WCR, val);
 	default:
-		pr_warning("attempt to read from unknown breakpoint register %d\n", n);
+		pr_warn("attempt to read from unknown breakpoint register %d\n", n);
 	}
 
 	return val;
@@ -138,7 +130,7 @@ static void write_wb_reg(int reg, int n, u64 val)
 	GEN_WRITE_WB_REG_CASES(AARCH64_DBG_REG_WVR, AARCH64_DBG_REG_NAME_WVR, val);
 	GEN_WRITE_WB_REG_CASES(AARCH64_DBG_REG_WCR, AARCH64_DBG_REG_NAME_WCR, val);
 	default:
-		pr_warning("attempt to write to unknown breakpoint register %d\n", n);
+		pr_warn("attempt to write to unknown breakpoint register %d\n", n);
 	}
 	isb();
 }
@@ -156,7 +148,7 @@ static enum dbg_active_el debug_exception_level(int privilege)
 	case AARCH64_BREAKPOINT_EL1:
 		return DBG_ACTIVE_EL1;
 	default:
-		pr_warning("invalid breakpoint privilege level %d\n", privilege);
+		pr_warn("invalid breakpoint privilege level %d\n", privilege);
 		return -EINVAL;
 	}
 }
@@ -230,6 +222,12 @@ static int hw_breakpoint_slot_setup(struct perf_event **slots, int max_slots,
 	return -ENOSPC;
 }
 
+/*
+ * Configure hardware breakpoint registers from a perf event,
+ * according to operation.
+ *
+ * Must be called with debug exceptions masked.
+ */
 static int hw_breakpoint_control(struct perf_event *bp,
 				 enum hw_breakpoint_ops ops)
 {
@@ -268,7 +266,7 @@ static int hw_breakpoint_control(struct perf_event *bp,
 		 * level.
 		 */
 		enable_debug_monitors(dbg_el);
-		/* Fall through */
+		fallthrough;
 	case HW_BREAKPOINT_RESTORE:
 		/* Setup the address register. */
 		write_wb_reg(val_reg, i, info->address);
@@ -295,15 +293,24 @@ static int hw_breakpoint_control(struct perf_event *bp,
 
 /*
  * Install a perf counter breakpoint.
+ *
+ * Perf can and will call this with debug exceptions unmasked.
+ * Mask them to avoid triggering one while manipulating their registers.
  */
 int arch_install_hw_breakpoint(struct perf_event *bp)
 {
-	return hw_breakpoint_control(bp, HW_BREAKPOINT_INSTALL);
+	unsigned long daif = local_daif_save();
+	int ret = hw_breakpoint_control(bp, HW_BREAKPOINT_INSTALL);
+
+	local_daif_restore(daif);
+	return ret;
 }
 
 void arch_uninstall_hw_breakpoint(struct perf_event *bp)
 {
+	unsigned long daif = local_daif_save();
 	hw_breakpoint_control(bp, HW_BREAKPOINT_UNINSTALL);
+	local_daif_restore(daif);
 }
 
 static int get_hbp_len(u8 hbp_len)
@@ -317,8 +324,20 @@ static int get_hbp_len(u8 hbp_len)
 	case ARM_BREAKPOINT_LEN_2:
 		len_in_bytes = 2;
 		break;
+	case ARM_BREAKPOINT_LEN_3:
+		len_in_bytes = 3;
+		break;
 	case ARM_BREAKPOINT_LEN_4:
 		len_in_bytes = 4;
+		break;
+	case ARM_BREAKPOINT_LEN_5:
+		len_in_bytes = 5;
+		break;
+	case ARM_BREAKPOINT_LEN_6:
+		len_in_bytes = 6;
+		break;
+	case ARM_BREAKPOINT_LEN_7:
+		len_in_bytes = 7;
 		break;
 	case ARM_BREAKPOINT_LEN_8:
 		len_in_bytes = 8;
@@ -331,14 +350,13 @@ static int get_hbp_len(u8 hbp_len)
 /*
  * Check whether bp virtual address is in kernel space.
  */
-int arch_check_bp_in_kernelspace(struct perf_event *bp)
+int arch_check_bp_in_kernelspace(struct arch_hw_breakpoint *hw)
 {
 	unsigned int len;
 	unsigned long va;
-	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
 
-	va = info->address;
-	len = get_hbp_len(info->ctrl.len);
+	va = hw->address;
+	len = get_hbp_len(hw->ctrl.len);
 
 	return (va >= TASK_SIZE) && ((va + len - 1) >= TASK_SIZE);
 }
@@ -349,7 +367,7 @@ int arch_check_bp_in_kernelspace(struct perf_event *bp)
  * to generic breakpoint descriptions.
  */
 int arch_bp_generic_fields(struct arch_hw_breakpoint_ctrl ctrl,
-			   int *gen_len, int *gen_type)
+			   int *gen_len, int *gen_type, int *offset)
 {
 	/* Type */
 	switch (ctrl.type) {
@@ -369,16 +387,32 @@ int arch_bp_generic_fields(struct arch_hw_breakpoint_ctrl ctrl,
 		return -EINVAL;
 	}
 
+	if (!ctrl.len)
+		return -EINVAL;
+	*offset = __ffs(ctrl.len);
+
 	/* Len */
-	switch (ctrl.len) {
+	switch (ctrl.len >> *offset) {
 	case ARM_BREAKPOINT_LEN_1:
 		*gen_len = HW_BREAKPOINT_LEN_1;
 		break;
 	case ARM_BREAKPOINT_LEN_2:
 		*gen_len = HW_BREAKPOINT_LEN_2;
 		break;
+	case ARM_BREAKPOINT_LEN_3:
+		*gen_len = HW_BREAKPOINT_LEN_3;
+		break;
 	case ARM_BREAKPOINT_LEN_4:
 		*gen_len = HW_BREAKPOINT_LEN_4;
+		break;
+	case ARM_BREAKPOINT_LEN_5:
+		*gen_len = HW_BREAKPOINT_LEN_5;
+		break;
+	case ARM_BREAKPOINT_LEN_6:
+		*gen_len = HW_BREAKPOINT_LEN_6;
+		break;
+	case ARM_BREAKPOINT_LEN_7:
+		*gen_len = HW_BREAKPOINT_LEN_7;
 		break;
 	case ARM_BREAKPOINT_LEN_8:
 		*gen_len = HW_BREAKPOINT_LEN_8;
@@ -393,41 +427,53 @@ int arch_bp_generic_fields(struct arch_hw_breakpoint_ctrl ctrl,
 /*
  * Construct an arch_hw_breakpoint from a perf_event.
  */
-static int arch_build_bp_info(struct perf_event *bp)
+static int arch_build_bp_info(struct perf_event *bp,
+			      const struct perf_event_attr *attr,
+			      struct arch_hw_breakpoint *hw)
 {
-	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
-
 	/* Type */
-	switch (bp->attr.bp_type) {
+	switch (attr->bp_type) {
 	case HW_BREAKPOINT_X:
-		info->ctrl.type = ARM_BREAKPOINT_EXECUTE;
+		hw->ctrl.type = ARM_BREAKPOINT_EXECUTE;
 		break;
 	case HW_BREAKPOINT_R:
-		info->ctrl.type = ARM_BREAKPOINT_LOAD;
+		hw->ctrl.type = ARM_BREAKPOINT_LOAD;
 		break;
 	case HW_BREAKPOINT_W:
-		info->ctrl.type = ARM_BREAKPOINT_STORE;
+		hw->ctrl.type = ARM_BREAKPOINT_STORE;
 		break;
 	case HW_BREAKPOINT_RW:
-		info->ctrl.type = ARM_BREAKPOINT_LOAD | ARM_BREAKPOINT_STORE;
+		hw->ctrl.type = ARM_BREAKPOINT_LOAD | ARM_BREAKPOINT_STORE;
 		break;
 	default:
 		return -EINVAL;
 	}
 
 	/* Len */
-	switch (bp->attr.bp_len) {
+	switch (attr->bp_len) {
 	case HW_BREAKPOINT_LEN_1:
-		info->ctrl.len = ARM_BREAKPOINT_LEN_1;
+		hw->ctrl.len = ARM_BREAKPOINT_LEN_1;
 		break;
 	case HW_BREAKPOINT_LEN_2:
-		info->ctrl.len = ARM_BREAKPOINT_LEN_2;
+		hw->ctrl.len = ARM_BREAKPOINT_LEN_2;
+		break;
+	case HW_BREAKPOINT_LEN_3:
+		hw->ctrl.len = ARM_BREAKPOINT_LEN_3;
 		break;
 	case HW_BREAKPOINT_LEN_4:
-		info->ctrl.len = ARM_BREAKPOINT_LEN_4;
+		hw->ctrl.len = ARM_BREAKPOINT_LEN_4;
+		break;
+	case HW_BREAKPOINT_LEN_5:
+		hw->ctrl.len = ARM_BREAKPOINT_LEN_5;
+		break;
+	case HW_BREAKPOINT_LEN_6:
+		hw->ctrl.len = ARM_BREAKPOINT_LEN_6;
+		break;
+	case HW_BREAKPOINT_LEN_7:
+		hw->ctrl.len = ARM_BREAKPOINT_LEN_7;
 		break;
 	case HW_BREAKPOINT_LEN_8:
-		info->ctrl.len = ARM_BREAKPOINT_LEN_8;
+		hw->ctrl.len = ARM_BREAKPOINT_LEN_8;
 		break;
 	default:
 		return -EINVAL;
@@ -438,37 +484,37 @@ static int arch_build_bp_info(struct perf_event *bp)
 	 * AArch32 also requires breakpoints of length 2 for Thumb.
 	 * Watchpoints can be of length 1, 2, 4 or 8 bytes.
 	 */
-	if (info->ctrl.type == ARM_BREAKPOINT_EXECUTE) {
+	if (hw->ctrl.type == ARM_BREAKPOINT_EXECUTE) {
 		if (is_compat_bp(bp)) {
-			if (info->ctrl.len != ARM_BREAKPOINT_LEN_2 &&
-			    info->ctrl.len != ARM_BREAKPOINT_LEN_4)
+			if (hw->ctrl.len != ARM_BREAKPOINT_LEN_2 &&
+			    hw->ctrl.len != ARM_BREAKPOINT_LEN_4)
 				return -EINVAL;
-		} else if (info->ctrl.len != ARM_BREAKPOINT_LEN_4) {
+		} else if (hw->ctrl.len != ARM_BREAKPOINT_LEN_4) {
 			/*
 			 * FIXME: Some tools (I'm looking at you perf) assume
 			 *	  that breakpoints should be sizeof(long). This
 			 *	  is nonsense. For now, we fix up the parameter
 			 *	  but we should probably return -EINVAL instead.
 			 */
-			info->ctrl.len = ARM_BREAKPOINT_LEN_4;
+			hw->ctrl.len = ARM_BREAKPOINT_LEN_4;
 		}
 	}
 
 	/* Address */
-	info->address = bp->attr.bp_addr;
+	hw->address = attr->bp_addr;
 
 	/*
 	 * Privilege
 	 * Note that we disallow combined EL0/EL1 breakpoints because
 	 * that would complicate the stepping code.
 	 */
-	if (arch_check_bp_in_kernelspace(bp))
-		info->ctrl.privilege = AARCH64_BREAKPOINT_EL1;
+	if (arch_check_bp_in_kernelspace(hw))
+		hw->ctrl.privilege = AARCH64_BREAKPOINT_EL1;
 	else
-		info->ctrl.privilege = AARCH64_BREAKPOINT_EL0;
+		hw->ctrl.privilege = AARCH64_BREAKPOINT_EL0;
 
 	/* Enabled? */
-	info->ctrl.enabled = !bp->attr.disabled;
+	hw->ctrl.enabled = !attr->disabled;
 
 	return 0;
 }
@@ -476,14 +522,15 @@ static int arch_build_bp_info(struct perf_event *bp)
 /*
  * Validate the arch-specific HW Breakpoint register settings.
  */
-int arch_validate_hwbkpt_settings(struct perf_event *bp)
+int hw_breakpoint_arch_parse(struct perf_event *bp,
+			     const struct perf_event_attr *attr,
+			     struct arch_hw_breakpoint *hw)
 {
-	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
 	int ret;
 	u64 alignment_mask, offset;
 
 	/* Build the arch_hw_breakpoint. */
-	ret = arch_build_bp_info(bp);
+	ret = arch_build_bp_info(bp, attr, hw);
 	if (ret)
 		return ret;
 
@@ -497,43 +544,56 @@ int arch_validate_hwbkpt_settings(struct perf_event *bp)
 	 * that here.
 	 */
 	if (is_compat_bp(bp)) {
-		if (info->ctrl.len == ARM_BREAKPOINT_LEN_8)
+		if (hw->ctrl.len == ARM_BREAKPOINT_LEN_8)
 			alignment_mask = 0x7;
 		else
 			alignment_mask = 0x3;
-		offset = info->address & alignment_mask;
+		offset = hw->address & alignment_mask;
 		switch (offset) {
 		case 0:
 			/* Aligned */
 			break;
 		case 1:
-			/* Allow single byte watchpoint. */
-			if (info->ctrl.len == ARM_BREAKPOINT_LEN_1)
-				break;
 		case 2:
 			/* Allow halfword watchpoints and breakpoints. */
-			if (info->ctrl.len == ARM_BREAKPOINT_LEN_2)
+			if (hw->ctrl.len == ARM_BREAKPOINT_LEN_2)
 				break;
+
+			fallthrough;
+		case 3:
+			/* Allow single byte watchpoint. */
+			if (hw->ctrl.len == ARM_BREAKPOINT_LEN_1)
+				break;
+
+			fallthrough;
 		default:
 			return -EINVAL;
 		}
-
-		info->address &= ~alignment_mask;
-		info->ctrl.len <<= offset;
 	} else {
-		if (info->ctrl.type == ARM_BREAKPOINT_EXECUTE)
+		if (hw->ctrl.type == ARM_BREAKPOINT_EXECUTE)
 			alignment_mask = 0x3;
 		else
 			alignment_mask = 0x7;
-		if (info->address & alignment_mask)
+		offset = hw->address & alignment_mask;
+
+		/*
+		 * BAS is an 8-bit field in WCR/BCR; the shift below would
+		 * silently drop the high bits of ctrl.len when offset + len
+		 * exceeds 8, programming hardware to watch fewer bytes than
+		 * the user requested.
+		 */
+		if (((u32)hw->ctrl.len << offset) > ARM_BREAKPOINT_LEN_8)
 			return -EINVAL;
 	}
+
+	hw->address &= ~alignment_mask;
+	hw->ctrl.len <<= offset;
 
 	/*
 	 * Disallow per-task kernel breakpoints since these would
 	 * complicate the stepping code.
 	 */
-	if (info->ctrl.privilege == AARCH64_BREAKPOINT_EL1 && bp->hw.target)
+	if (hw->ctrl.privilege == AARCH64_BREAKPOINT_EL1 && bp->hw.target)
 		return -EINVAL;
 
 	return 0;
@@ -542,7 +602,10 @@ int arch_validate_hwbkpt_settings(struct perf_event *bp)
 /*
  * Enable/disable all of the breakpoints active at the specified
  * exception level at the register level.
- * This is used when single-stepping after a breakpoint exception.
+ * This is used when single-stepping after a breakpoint exception or switching
+ * threads.
+ *
+ * Must be called with debug exceptions masked.
  */
 static void toggle_bp_registers(int reg, enum dbg_active_el el, int enable)
 {
@@ -584,8 +647,7 @@ NOKPROBE_SYMBOL(toggle_bp_registers);
 /*
  * Debug exception handlers.
  */
-static int breakpoint_handler(unsigned long unused, unsigned int esr,
-			      struct pt_regs *regs)
+void do_breakpoint(unsigned long esr, struct pt_regs *regs)
 {
 	int i, step = 0, *kernel_step;
 	u32 ctrl_reg;
@@ -628,7 +690,7 @@ unlock:
 	}
 
 	if (!step)
-		return 0;
+		return;
 
 	if (user_mode(regs)) {
 		debug_info->bps_disabled = 1;
@@ -636,7 +698,7 @@ unlock:
 
 		/* If we're already stepping a watchpoint, just return. */
 		if (debug_info->wps_disabled)
-			return 0;
+			return;
 
 		if (test_thread_flag(TIF_SINGLESTEP))
 			debug_info->suspended_step = 1;
@@ -647,7 +709,7 @@ unlock:
 		kernel_step = this_cpu_ptr(&stepping_kernel_bp);
 
 		if (*kernel_step != ARM_KERNEL_STEP_NONE)
-			return 0;
+			return;
 
 		if (kernel_active_single_step()) {
 			*kernel_step = ARM_KERNEL_STEP_SUSPEND;
@@ -656,77 +718,122 @@ unlock:
 			kernel_enable_single_step(regs);
 		}
 	}
-
-	return 0;
 }
-NOKPROBE_SYMBOL(breakpoint_handler);
+NOKPROBE_SYMBOL(do_breakpoint);
 
-static int watchpoint_handler(unsigned long addr, unsigned int esr,
-			      struct pt_regs *regs)
+/*
+ * Arm64 hardware does not always report a watchpoint hit address that matches
+ * one of the watchpoints set. It can also report an address "near" the
+ * watchpoint if a single instruction access both watched and unwatched
+ * addresses. There is no straight-forward way, short of disassembling the
+ * offending instruction, to map that address back to the watchpoint. This
+ * function computes the distance of the memory access from the watchpoint as a
+ * heuristic for the likelihood that a given access triggered the watchpoint.
+ *
+ * See Section D2.10.5 "Determining the memory location that caused a Watchpoint
+ * exception" of ARMv8 Architecture Reference Manual for details.
+ *
+ * The function returns the distance of the address from the bytes watched by
+ * the watchpoint. In case of an exact match, it returns 0.
+ */
+static u64 get_distance_from_watchpoint(unsigned long addr, u64 val,
+					struct arch_hw_breakpoint_ctrl *ctrl)
 {
-	int i, step = 0, *kernel_step, access;
+	u64 wp_low, wp_high;
+	u32 lens, lene;
+
+	addr = untagged_addr(addr);
+
+	lens = __ffs(ctrl->len);
+	lene = __fls(ctrl->len);
+
+	wp_low = val + lens;
+	wp_high = val + lene;
+	if (addr < wp_low)
+		return wp_low - addr;
+	else if (addr > wp_high)
+		return addr - wp_high;
+	else
+		return 0;
+}
+
+static int watchpoint_report(struct perf_event *wp, unsigned long addr,
+			     struct pt_regs *regs)
+{
+	int step = is_default_overflow_handler(wp);
+	struct arch_hw_breakpoint *info = counter_arch_bp(wp);
+
+	info->trigger = addr;
+
+	/*
+	 * If we triggered a user watchpoint from a uaccess routine, then
+	 * handle the stepping ourselves since userspace really can't help
+	 * us with this.
+	 */
+	if (!user_mode(regs) && info->ctrl.privilege == AARCH64_BREAKPOINT_EL0)
+		step = 1;
+	else
+		perf_bp_event(wp, regs);
+
+	return step;
+}
+
+void do_watchpoint(unsigned long addr, unsigned long esr, struct pt_regs *regs)
+{
+	int i, step = 0, *kernel_step, access, closest_match = 0;
+	u64 min_dist = -1, dist;
 	u32 ctrl_reg;
-	u64 val, alignment_mask;
+	u64 val;
 	struct perf_event *wp, **slots;
 	struct debug_info *debug_info;
-	struct arch_hw_breakpoint *info;
 	struct arch_hw_breakpoint_ctrl ctrl;
 
 	slots = this_cpu_ptr(wp_on_reg);
 	debug_info = &current->thread.debug;
 
+	/*
+	 * Find all watchpoints that match the reported address. If no exact
+	 * match is found. Attribute the hit to the closest watchpoint.
+	 */
+	rcu_read_lock();
 	for (i = 0; i < core_num_wrps; ++i) {
-		rcu_read_lock();
-
 		wp = slots[i];
-
 		if (wp == NULL)
-			goto unlock;
-
-		info = counter_arch_bp(wp);
-		/* AArch32 watchpoints are either 4 or 8 bytes aligned. */
-		if (is_compat_task()) {
-			if (info->ctrl.len == ARM_BREAKPOINT_LEN_8)
-				alignment_mask = 0x7;
-			else
-				alignment_mask = 0x3;
-		} else {
-			alignment_mask = 0x7;
-		}
-
-		/* Check if the watchpoint value matches. */
-		val = read_wb_reg(AARCH64_DBG_REG_WVR, i);
-		if (val != (addr & ~alignment_mask))
-			goto unlock;
-
-		/* Possible match, check the byte address select to confirm. */
-		ctrl_reg = read_wb_reg(AARCH64_DBG_REG_WCR, i);
-		decode_ctrl_reg(ctrl_reg, &ctrl);
-		if (!((1 << (addr & alignment_mask)) & ctrl.len))
-			goto unlock;
+			continue;
 
 		/*
 		 * Check that the access type matches.
 		 * 0 => load, otherwise => store
 		 */
-		access = (esr & AARCH64_ESR_ACCESS_MASK) ? HW_BREAKPOINT_W :
+		access = (esr & ESR_ELx_WNR) ? HW_BREAKPOINT_W :
 			 HW_BREAKPOINT_R;
 		if (!(access & hw_breakpoint_type(wp)))
-			goto unlock;
+			continue;
 
-		info->trigger = addr;
-		perf_bp_event(wp, regs);
+		/* Check if the watchpoint value and byte select match. */
+		val = read_wb_reg(AARCH64_DBG_REG_WVR, i);
+		ctrl_reg = read_wb_reg(AARCH64_DBG_REG_WCR, i);
+		decode_ctrl_reg(ctrl_reg, &ctrl);
+		dist = get_distance_from_watchpoint(addr, val, &ctrl);
+		if (dist < min_dist) {
+			min_dist = dist;
+			closest_match = i;
+		}
+		/* Is this an exact match? */
+		if (dist != 0)
+			continue;
 
-		/* Do we need to handle the stepping? */
-		if (is_default_overflow_handler(wp))
-			step = 1;
-
-unlock:
-		rcu_read_unlock();
+		step = watchpoint_report(wp, addr, regs);
 	}
 
+	/* No exact match found? */
+	if (min_dist > 0 && min_dist != -1)
+		step = watchpoint_report(slots[closest_match], addr, regs);
+
+	rcu_read_unlock();
+
 	if (!step)
-		return 0;
+		return;
 
 	/*
 	 * We always disable EL0 watchpoints because the kernel can
@@ -739,7 +846,7 @@ unlock:
 
 		/* If we're already stepping a breakpoint, just return. */
 		if (debug_info->bps_disabled)
-			return 0;
+			return;
 
 		if (test_thread_flag(TIF_SINGLESTEP))
 			debug_info->suspended_step = 1;
@@ -750,7 +857,7 @@ unlock:
 		kernel_step = this_cpu_ptr(&stepping_kernel_bp);
 
 		if (*kernel_step != ARM_KERNEL_STEP_NONE)
-			return 0;
+			return;
 
 		if (kernel_active_single_step()) {
 			*kernel_step = ARM_KERNEL_STEP_SUSPEND;
@@ -759,44 +866,41 @@ unlock:
 			kernel_enable_single_step(regs);
 		}
 	}
-
-	return 0;
 }
-NOKPROBE_SYMBOL(watchpoint_handler);
+NOKPROBE_SYMBOL(do_watchpoint);
 
 /*
  * Handle single-step exception.
  */
-int reinstall_suspended_bps(struct pt_regs *regs)
+bool try_step_suspended_breakpoints(struct pt_regs *regs)
 {
 	struct debug_info *debug_info = &current->thread.debug;
-	int handled_exception = 0, *kernel_step;
-
-	kernel_step = this_cpu_ptr(&stepping_kernel_bp);
+	int *kernel_step = this_cpu_ptr(&stepping_kernel_bp);
+	bool handled_exception = false;
 
 	/*
-	 * Called from single-step exception handler.
-	 * Return 0 if execution can resume, 1 if a SIGTRAP should be
-	 * reported.
+	 * Called from single-step exception entry.
+	 * Return true if we stepped a breakpoint and can resume execution,
+	 * false if we need to handle a single-step.
 	 */
 	if (user_mode(regs)) {
 		if (debug_info->bps_disabled) {
 			debug_info->bps_disabled = 0;
 			toggle_bp_registers(AARCH64_DBG_REG_BCR, DBG_ACTIVE_EL0, 1);
-			handled_exception = 1;
+			handled_exception = true;
 		}
 
 		if (debug_info->wps_disabled) {
 			debug_info->wps_disabled = 0;
 			toggle_bp_registers(AARCH64_DBG_REG_WCR, DBG_ACTIVE_EL0, 1);
-			handled_exception = 1;
+			handled_exception = true;
 		}
 
 		if (handled_exception) {
 			if (debug_info->suspended_step) {
 				debug_info->suspended_step = 0;
 				/* Allow exception handling to fall-through. */
-				handled_exception = 0;
+				handled_exception = false;
 			} else {
 				user_disable_single_step(current);
 			}
@@ -810,20 +914,24 @@ int reinstall_suspended_bps(struct pt_regs *regs)
 
 		if (*kernel_step != ARM_KERNEL_STEP_SUSPEND) {
 			kernel_disable_single_step();
-			handled_exception = 1;
+			handled_exception = true;
 		} else {
-			handled_exception = 0;
+			handled_exception = false;
 		}
 
 		*kernel_step = ARM_KERNEL_STEP_NONE;
 	}
 
-	return !handled_exception;
+	return handled_exception;
 }
-NOKPROBE_SYMBOL(reinstall_suspended_bps);
+NOKPROBE_SYMBOL(try_step_suspended_breakpoints);
 
 /*
- * Context-switcher for restoring suspended breakpoints.
+ * Context-switcher for restoring suspended CPU-bound breakpoints.
+ *
+ * Breakpoints of the previous task are uninstalled before
+ * this function is called, in perf_event_task_sched_out(), and those
+ * of the next task are installed after, in perf_event_task_sched_in().
  */
 void hw_breakpoint_thread_switch(struct task_struct *next)
 {
@@ -837,6 +945,7 @@ void hw_breakpoint_thread_switch(struct task_struct *next)
 	 */
 
 	struct debug_info *current_debug_info, *next_debug_info;
+	unsigned long daif = local_daif_save();
 
 	current_debug_info = &current->thread.debug;
 	next_debug_info = &next->thread.debug;
@@ -852,12 +961,14 @@ void hw_breakpoint_thread_switch(struct task_struct *next)
 		toggle_bp_registers(AARCH64_DBG_REG_WCR,
 				    DBG_ACTIVE_EL0,
 				    !next_debug_info->wps_disabled);
+
+	local_daif_restore(daif);
 }
 
 /*
  * CPU initialisation.
  */
-static void hw_breakpoint_reset(void *unused)
+static int hw_breakpoint_reset(unsigned int cpu)
 {
 	int i;
 	struct perf_event **slots;
@@ -888,67 +999,37 @@ static void hw_breakpoint_reset(void *unused)
 			write_wb_reg(AARCH64_DBG_REG_WVR, i, 0UL);
 		}
 	}
-}
 
-static int hw_breakpoint_reset_notify(struct notifier_block *self,
-						unsigned long action,
-						void *hcpu)
-{
-	if ((action & ~CPU_TASKS_FROZEN) == CPU_ONLINE) {
-		local_irq_disable();
-		hw_breakpoint_reset(NULL);
-		local_irq_enable();
-	}
-	return NOTIFY_OK;
+	return 0;
 }
-
-static struct notifier_block hw_breakpoint_reset_nb = {
-	.notifier_call = hw_breakpoint_reset_notify,
-};
-
-#ifdef CONFIG_CPU_PM
-extern void cpu_suspend_set_dbg_restorer(void (*hw_bp_restore)(void *));
-#else
-static inline void cpu_suspend_set_dbg_restorer(void (*hw_bp_restore)(void *))
-{
-}
-#endif
 
 /*
  * One-time initialisation.
  */
 static int __init arch_hw_breakpoint_init(void)
 {
+	int ret;
+
 	core_num_brps = get_num_brps();
 	core_num_wrps = get_num_wrps();
 
 	pr_info("found %d breakpoint and %d watchpoint registers.\n",
 		core_num_brps, core_num_wrps);
 
-	cpu_notifier_register_begin();
-
 	/*
 	 * Reset the breakpoint resources. We assume that a halting
 	 * debugger will leave the world in a nice state for us.
 	 */
-	smp_call_function(hw_breakpoint_reset, NULL, 1);
-	hw_breakpoint_reset(NULL);
-
-	/* Register debug fault handlers. */
-	hook_debug_fault_code(DBG_ESR_EVT_HWBP, breakpoint_handler, SIGTRAP,
-			      TRAP_HWBKPT, "hw-breakpoint handler");
-	hook_debug_fault_code(DBG_ESR_EVT_HWWP, watchpoint_handler, SIGTRAP,
-			      TRAP_HWBKPT, "hw-watchpoint handler");
-
-	/* Register hotplug notifier. */
-	__register_cpu_notifier(&hw_breakpoint_reset_nb);
-
-	cpu_notifier_register_done();
+	ret = cpuhp_setup_state(CPUHP_AP_PERF_ARM_HW_BREAKPOINT_STARTING,
+			  "perf/arm64/hw_breakpoint:starting",
+			  hw_breakpoint_reset, NULL);
+	if (ret)
+		pr_err("failed to register CPU hotplug notifier: %d\n", ret);
 
 	/* Register cpu_suspend hw breakpoint restore hook */
 	cpu_suspend_set_dbg_restorer(hw_breakpoint_reset);
 
-	return 0;
+	return ret;
 }
 arch_initcall(arch_hw_breakpoint_init);
 

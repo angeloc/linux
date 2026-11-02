@@ -43,7 +43,7 @@ static bool ath_mci_add_profile(struct ath_common *common,
 				struct ath_mci_profile_info *info)
 {
 	struct ath_mci_profile_info *entry;
-	u8 voice_priority[] = { 110, 110, 110, 112, 110, 110, 114, 116, 118 };
+	static const u8 voice_priority[] = { 110, 110, 110, 112, 110, 110, 114, 116, 118 };
 
 	if ((mci->num_sco == ATH_MCI_MAX_SCO_PROFILE) &&
 	    (info->type == MCI_GPM_COEX_PROFILE_VOICE))
@@ -53,7 +53,7 @@ static bool ath_mci_add_profile(struct ath_common *common,
 	    (info->type != MCI_GPM_COEX_PROFILE_VOICE))
 		return false;
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+	entry = kzalloc_obj(*entry, GFP_ATOMIC);
 	if (!entry)
 		return false;
 
@@ -266,7 +266,9 @@ static void ath_mci_set_concur_txprio(struct ath_softc *sc)
 			stomp_txprio[ATH_BTCOEX_STOMP_NONE] =
 				ATH_MCI_INQUIRY_PRIO;
 	} else {
-		u8 prof_prio[] = { 50, 90, 94, 52 };/* RFCOMM, A2DP, HID, PAN */
+		static const u8 prof_prio[] = {
+			50, 90, 94, 52
+		}; /* RFCOMM, A2DP, HID, PAN */
 
 		stomp_txprio[ATH_BTCOEX_STOMP_LOW] =
 		stomp_txprio[ATH_BTCOEX_STOMP_NONE] = 0xff;
@@ -346,10 +348,7 @@ static u8 ath_mci_process_status(struct ath_softc *sc,
 	if (status->conn_handle >= ATH_MCI_MAX_PROFILE)
 		return 0;
 
-	if (status->is_critical)
-		__set_bit(status->conn_handle, mci->status);
-	else
-		__clear_bit(status->conn_handle, mci->status);
+	__assign_bit(status->conn_handle, mci->status, status->is_critical);
 
 	mci->num_mgmt = 0;
 	do {
@@ -453,7 +452,7 @@ int ath_mci_setup(struct ath_softc *sc)
 	mci->sched_buf.bf_len = ATH_MCI_SCHED_BUF_SIZE;
 
 	mci->gpm_buf.bf_len = ATH_MCI_GPM_BUF_SIZE;
-	mci->gpm_buf.bf_addr = (u8 *)mci->sched_buf.bf_addr + mci->sched_buf.bf_len;
+	mci->gpm_buf.bf_addr = mci->sched_buf.bf_addr + mci->sched_buf.bf_len;
 	mci->gpm_buf.bf_paddr = mci->sched_buf.bf_paddr + mci->sched_buf.bf_len;
 
 	ret = ar9003_mci_setup(sc->sc_ah, mci->gpm_buf.bf_paddr,
@@ -548,7 +547,7 @@ void ath_mci_intr(struct ath_softc *sc)
 
 	if (mci_int_rxmsg & AR_MCI_INTERRUPT_RX_MSG_SCHD_INFO) {
 		mci_int_rxmsg &= ~AR_MCI_INTERRUPT_RX_MSG_SCHD_INFO;
-		offset = ar9003_mci_state(ah, MCI_STATE_LAST_SCHD_MSG_OFFSET);
+		ar9003_mci_state(ah, MCI_STATE_LAST_SCHD_MSG_OFFSET);
 	}
 
 	if (mci_int_rxmsg & AR_MCI_INTERRUPT_RX_MSG_GPM) {

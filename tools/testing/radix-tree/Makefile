@@ -1,19 +1,30 @@
+# SPDX-License-Identifier: GPL-2.0
 
-CFLAGS += -I. -g -Wall -D_LGPL_SOURCE
-LDFLAGS += -lpthread -lurcu
-TARGETS = main
-OFILES = main.o radix-tree.o linux.o test.o tag_check.o find_next_bit.o \
-	 regression1.o regression2.o regression3.o multiorder.o
+.PHONY: clean
 
-targets: $(TARGETS)
+TARGETS = main idr-test multiorder xarray maple
+CORE_OFILES = $(SHARED_OFILES) xarray.o maple.o test.o
+OFILES = main.o $(CORE_OFILES) regression1.o regression2.o \
+	 regression3.o regression4.o tag_check.o multiorder.o idr-test.o \
+	iteration_check.o iteration_check_2.o benchmark.o
+
+targets: generated/map-shift.h generated/bit-length.h $(TARGETS)
+
+include ../shared/shared.mk
 
 main:	$(OFILES)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(OFILES) -o main
+
+xarray.o: ../../../lib/test_xarray.c
+idr-test.o: ../../../lib/test_ida.c
+idr-test: idr-test.o $(CORE_OFILES)
+
+xarray: $(CORE_OFILES) xarray.o
+
+maple: $(CORE_OFILES) maple.o
+
+multiorder: multiorder.o $(CORE_OFILES)
 
 clean:
-	$(RM) -f $(TARGETS) *.o radix-tree.c
+	$(RM) $(TARGETS) *.o radix-tree.c idr.c generated/*
 
-$(OFILES): *.h */*.h ../../../include/linux/radix-tree.h ../../include/linux/*.h
-
-radix-tree.c: ../../../lib/radix-tree.c
-	sed -e 's/^static //' -e 's/__always_inline //' -e 's/inline //' < $< > $@
+$(OFILES): $(SHARED_DEPS) *.h

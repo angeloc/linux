@@ -1,15 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * WM831x clock control
  *
  * Copyright 2011-2 Wolfson Microelectronics PLC.
  *
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #include <linux/clk-provider.h>
@@ -24,9 +19,6 @@ struct wm831x_clk {
 	struct clk_hw xtal_hw;
 	struct clk_hw fll_hw;
 	struct clk_hw clkout_hw;
-	struct clk *xtal;
-	struct clk *fll;
-	struct clk *clkout;
 	bool xtal_ena;
 };
 
@@ -55,7 +47,7 @@ static const struct clk_ops wm831x_xtal_ops = {
 	.recalc_rate = wm831x_xtal_recalc_rate,
 };
 
-static struct clk_init_data wm831x_xtal_init = {
+static const struct clk_init_data wm831x_xtal_init = {
 	.name = "xtal",
 	.ops = &wm831x_xtal_ops,
 };
@@ -100,7 +92,8 @@ static int wm831x_fll_prepare(struct clk_hw *hw)
 	if (ret != 0)
 		dev_crit(wm831x->dev, "Failed to enable FLL: %d\n", ret);
 
-	usleep_range(2000, 2000);
+	/* wait 2-3 ms for new frequency taking effect */
+	usleep_range(2000, 3000);
 
 	return ret;
 }
@@ -140,18 +133,20 @@ static unsigned long wm831x_fll_recalc_rate(struct clk_hw *hw,
 	return 0;
 }
 
-static long wm831x_fll_round_rate(struct clk_hw *hw, unsigned long rate,
-				  unsigned long *unused)
+static int wm831x_fll_determine_rate(struct clk_hw *hw,
+				     struct clk_rate_request *req)
 {
 	int best = 0;
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(wm831x_fll_auto_rates); i++)
-		if (abs(wm831x_fll_auto_rates[i] - rate) <
-		    abs(wm831x_fll_auto_rates[best] - rate))
+		if (abs(wm831x_fll_auto_rates[i] - req->rate) <
+		    abs(wm831x_fll_auto_rates[best] - req->rate))
 			best = i;
 
-	return wm831x_fll_auto_rates[best];
+	req->rate = wm831x_fll_auto_rates[best];
+
+	return 0;
 }
 
 static int wm831x_fll_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -221,13 +216,13 @@ static const struct clk_ops wm831x_fll_ops = {
 	.is_prepared = wm831x_fll_is_prepared,
 	.prepare = wm831x_fll_prepare,
 	.unprepare = wm831x_fll_unprepare,
-	.round_rate = wm831x_fll_round_rate,
+	.determine_rate = wm831x_fll_determine_rate,
 	.recalc_rate = wm831x_fll_recalc_rate,
 	.set_rate = wm831x_fll_set_rate,
 	.get_parent = wm831x_fll_get_parent,
 };
 
-static struct clk_init_data wm831x_fll_init = {
+static const struct clk_init_data wm831x_fll_init = {
 	.name = "fll",
 	.ops = &wm831x_fll_ops,
 	.parent_names = wm831x_fll_parents,
@@ -246,7 +241,7 @@ static int wm831x_clkout_is_prepared(struct clk_hw *hw)
 	if (ret < 0) {
 		dev_err(wm831x->dev, "Unable to read CLOCK_CONTROL_1: %d\n",
 			ret);
-		return true;
+		return false;
 	}
 
 	return (ret & WM831X_CLKOUT_ENA) != 0;
@@ -336,11 +331,12 @@ static const struct clk_ops wm831x_clkout_ops = {
 	.is_prepared = wm831x_clkout_is_prepared,
 	.prepare = wm831x_clkout_prepare,
 	.unprepare = wm831x_clkout_unprepare,
+	.determine_rate = clk_hw_determine_rate_no_reparent,
 	.get_parent = wm831x_clkout_get_parent,
 	.set_parent = wm831x_clkout_set_parent,
 };
 
-static struct clk_init_data wm831x_clkout_init = {
+static const struct clk_init_data wm831x_clkout_init = {
 	.name = "clkout",
 	.ops = &wm831x_clkout_ops,
 	.parent_names = wm831x_clkout_parents,
@@ -370,19 +366,19 @@ static int wm831x_clk_probe(struct platform_device *pdev)
 	clkdata->xtal_ena = ret & WM831X_XTAL_ENA;
 
 	clkdata->xtal_hw.init = &wm831x_xtal_init;
-	clkdata->xtal = devm_clk_register(&pdev->dev, &clkdata->xtal_hw);
-	if (IS_ERR(clkdata->xtal))
-		return PTR_ERR(clkdata->xtal);
+	ret = devm_clk_hw_register(&pdev->dev, &clkdata->xtal_hw);
+	if (ret)
+		return ret;
 
 	clkdata->fll_hw.init = &wm831x_fll_init;
-	clkdata->fll = devm_clk_register(&pdev->dev, &clkdata->fll_hw);
-	if (IS_ERR(clkdata->fll))
-		return PTR_ERR(clkdata->fll);
+	ret = devm_clk_hw_register(&pdev->dev, &clkdata->fll_hw);
+	if (ret)
+		return ret;
 
 	clkdata->clkout_hw.init = &wm831x_clkout_init;
-	clkdata->clkout = devm_clk_register(&pdev->dev, &clkdata->clkout_hw);
-	if (IS_ERR(clkdata->clkout))
-		return PTR_ERR(clkdata->clkout);
+	ret = devm_clk_hw_register(&pdev->dev, &clkdata->clkout_hw);
+	if (ret)
+		return ret;
 
 	platform_set_drvdata(pdev, clkdata);
 

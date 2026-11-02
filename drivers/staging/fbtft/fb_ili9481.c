@@ -1,18 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * FB driver for the ILI9481 LCD Controller
  *
  * Copyright (c) 2014 Petr Olivka
  * Copyright (c) 2013 Noralf Tronnes
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -27,7 +18,7 @@
 #define WIDTH		320
 #define HEIGHT		480
 
-static int default_init_sequence[] = {
+static const s16 default_init_sequence[] = {
 	/* SLP_OUT - Sleep out */
 	-1, MIPI_DCS_EXIT_SLEEP_MODE,
 	-2, 50,
@@ -50,17 +41,6 @@ static int default_init_sequence[] = {
 	-1, MIPI_DCS_SET_DISPLAY_ON,
 	-3
 };
-
-static void set_addr_win(struct fbtft_par *par, int xs, int ys, int xe, int ye)
-{
-	write_reg(par, MIPI_DCS_SET_COLUMN_ADDRESS,
-		  xs >> 8, xs & 0xff, xe >> 8, xe & 0xff);
-
-	write_reg(par, MIPI_DCS_SET_PAGE_ADDRESS,
-		  ys >> 8, ys & 0xff, ye >> 8, ye & 0xff);
-
-	write_reg(par, MIPI_DCS_WRITE_MEMORY_START);
-}
 
 #define HFLIP 0x01
 #define VFLIP 0x02
@@ -95,7 +75,6 @@ static struct fbtft_display display = {
 	.height = HEIGHT,
 	.init_sequence = default_init_sequence,
 	.fbtftops = {
-		.set_addr_win = set_addr_win,
 		.set_var = set_var,
 	},
 };

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * test for timerfd functions used by perf-kvm-stat-live
  */
@@ -5,7 +6,7 @@
 
 int main(void)
 {
-	struct itimerspec new_value;
+	struct itimerspec new_value = {};
 
 	int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
 	if (fd < 0)

@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __SPARC_SIGCONTEXT_H
 #define __SPARC_SIGCONTEXT_H
 
 #include <asm/ptrace.h>
 #include <uapi/asm/sigcontext.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define __SUNOS_MAXWIN   31
 
@@ -103,6 +104,6 @@ typedef struct {
 #endif /* (CONFIG_SPARC64) */
 
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(__ASSEMBLER__) */
 
 #endif /* !(__SPARC_SIGCONTEXT_H) */

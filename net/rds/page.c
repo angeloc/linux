@@ -40,39 +40,12 @@
 struct rds_page_remainder {
 	struct page	*r_page;
 	unsigned long	r_offset;
+	local_lock_t	bh_lock;
 };
 
-static
-DEFINE_PER_CPU_SHARED_ALIGNED(struct rds_page_remainder, rds_page_remainders);
-
-/*
- * returns 0 on success or -errno on failure.
- *
- * We don't have to worry about flush_dcache_page() as this only works
- * with private pages.  If, say, we were to do directed receive to pinned
- * user pages we'd have to worry more about cache coherence.  (Though
- * the flush_dcache_page() in get_user_pages() would probably be enough).
- */
-int rds_page_copy_user(struct page *page, unsigned long offset,
-		       void __user *ptr, unsigned long bytes,
-		       int to_user)
-{
-	unsigned long ret;
-	void *addr;
-
-	addr = kmap(page);
-	if (to_user) {
-		rds_stats_add(s_copy_to_user, bytes);
-		ret = copy_to_user(ptr, addr + offset, bytes);
-	} else {
-		rds_stats_add(s_copy_from_user, bytes);
-		ret = copy_from_user(addr + offset, ptr, bytes);
-	}
-	kunmap(page);
-
-	return ret ? -EFAULT : 0;
-}
-EXPORT_SYMBOL_GPL(rds_page_copy_user);
+static DEFINE_PER_CPU_SHARED_ALIGNED(struct rds_page_remainder, rds_page_remainders) = {
+	.bh_lock = INIT_LOCAL_LOCK(bh_lock),
+};
 
 /**
  * rds_page_remainder_alloc - build up regions of a message.
@@ -98,7 +71,6 @@ int rds_page_remainder_alloc(struct scatterlist *scat, unsigned long bytes,
 			     gfp_t gfp)
 {
 	struct rds_page_remainder *rem;
-	unsigned long flags;
 	struct page *page;
 	int ret;
 
@@ -116,8 +88,9 @@ int rds_page_remainder_alloc(struct scatterlist *scat, unsigned long bytes,
 		goto out;
 	}
 
-	rem = &per_cpu(rds_page_remainders, get_cpu());
-	local_irq_save(flags);
+	local_bh_disable();
+	local_lock_nested_bh(&rds_page_remainders.bh_lock);
+	rem = this_cpu_ptr(&rds_page_remainders);
 
 	while (1) {
 		/* avoid a tiny region getting stuck by tossing it */
@@ -145,13 +118,14 @@ int rds_page_remainder_alloc(struct scatterlist *scat, unsigned long bytes,
 		}
 
 		/* alloc if there is nothing for us to use */
-		local_irq_restore(flags);
-		put_cpu();
+		local_unlock_nested_bh(&rds_page_remainders.bh_lock);
+		local_bh_enable();
 
 		page = alloc_page(gfp);
 
-		rem = &per_cpu(rds_page_remainders, get_cpu());
-		local_irq_save(flags);
+		local_bh_disable();
+		local_lock_nested_bh(&rds_page_remainders.bh_lock);
+		rem = this_cpu_ptr(&rds_page_remainders);
 
 		if (!page) {
 			ret = -ENOMEM;
@@ -169,8 +143,8 @@ int rds_page_remainder_alloc(struct scatterlist *scat, unsigned long bytes,
 		rem->r_offset = 0;
 	}
 
-	local_irq_restore(flags);
-	put_cpu();
+	local_unlock_nested_bh(&rds_page_remainders.bh_lock);
+	local_bh_enable();
 out:
 	rdsdebug("bytes %lu ret %d %p %u %u\n", bytes, ret,
 		 ret ? NULL : sg_page(scat), ret ? 0 : scat->offset,

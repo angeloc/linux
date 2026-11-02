@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) Freescale Semicondutor, Inc. 2007, 2008.
  * Copyright (C) Semihalf 2009
@@ -11,19 +12,6 @@
  *
  * Approved as OSADL project by a majority of OSADL members and funded
  * by OSADL membership fees in 2009;  for details see www.osadl.org.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * The full GNU General Public License is included in this distribution in the
- * file called COPYING.
  */
 
 /*
@@ -48,11 +36,11 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/slab.h>
+#include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/of_irq.h>
 #include <linux/of_dma.h>
-#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 
 #include <linux/random.h>
 
@@ -411,8 +399,7 @@ static void mpc_dma_process_completed(struct mpc_dma *mdma)
 		list_for_each_entry(mdesc, &list, node) {
 			desc = &mdesc->desc;
 
-			if (desc->callback)
-				desc->callback(desc->callback_param);
+			dmaengine_desc_get_callback_invoke(desc, NULL);
 
 			last_cookie = desc->cookie;
 			dma_run_dependencies(desc);
@@ -427,9 +414,9 @@ static void mpc_dma_process_completed(struct mpc_dma *mdma)
 }
 
 /* DMA Tasklet */
-static void mpc_dma_tasklet(unsigned long data)
+static void mpc_dma_tasklet(struct tasklet_struct *t)
 {
-	struct mpc_dma *mdma = (void *)data;
+	struct mpc_dma *mdma = from_tasklet(mdma, t, tasklet);
 	unsigned long flags;
 	uint es;
 
@@ -516,7 +503,7 @@ static int mpc_dma_alloc_chan_resources(struct dma_chan *chan)
 
 	/* Alloc descriptors for this channel */
 	for (i = 0; i < MPC_DMA_DESCRIPTORS; i++) {
-		mdesc = kzalloc(sizeof(struct mpc_dma_desc), GFP_KERNEL);
+		mdesc = kzalloc_obj(struct mpc_dma_desc);
 		if (!mdesc) {
 			dev_notice(mdma->dma.dev,
 				"Memory allocation error. Allocated only %u descriptors\n", i);
@@ -826,6 +813,7 @@ inline bool is_buswidth_valid(u8 buswidth, bool is_mpc8308)
 	case 16:
 		if (is_mpc8308)
 			return false;
+		break;
 	case 1:
 	case 2:
 	case 4:
@@ -926,7 +914,7 @@ static int mpc_dma_probe(struct platform_device *op)
 	}
 
 	mdma->irq = irq_of_parse_and_map(dn, 0);
-	if (mdma->irq == NO_IRQ) {
+	if (!mdma->irq) {
 		dev_err(dev, "Error mapping IRQ!\n");
 		retval = -EINVAL;
 		goto err;
@@ -935,7 +923,7 @@ static int mpc_dma_probe(struct platform_device *op)
 	if (of_device_is_compatible(dn, "fsl,mpc8308-dma")) {
 		mdma->is_mpc8308 = 1;
 		mdma->irq2 = irq_of_parse_and_map(dn, 1);
-		if (mdma->irq2 == NO_IRQ) {
+		if (!mdma->irq2) {
 			dev_err(dev, "Error mapping IRQ!\n");
 			retval = -EINVAL;
 			goto err_dispose1;
@@ -1022,7 +1010,7 @@ static int mpc_dma_probe(struct platform_device *op)
 		list_add_tail(&mchan->chan.device_node, &dma->channels);
 	}
 
-	tasklet_init(&mdma->tasklet, mpc_dma_tasklet, (unsigned long)mdma);
+	tasklet_setup(&mdma->tasklet, mpc_dma_tasklet);
 
 	/*
 	 * Configure DMA Engine:
@@ -1096,7 +1084,7 @@ err:
 	return retval;
 }
 
-static int mpc_dma_remove(struct platform_device *op)
+static void mpc_dma_remove(struct platform_device *op)
 {
 	struct device *dev = &op->dev;
 	struct mpc_dma *mdma = dev_get_drvdata(dev);
@@ -1111,8 +1099,6 @@ static int mpc_dma_remove(struct platform_device *op)
 	free_irq(mdma->irq, mdma);
 	irq_dispose_mapping(mdma->irq);
 	tasklet_kill(&mdma->tasklet);
-
-	return 0;
 }
 
 static const struct of_device_id mpc_dma_match[] = {

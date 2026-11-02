@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Linux device driver for RTL8187
  *
@@ -14,10 +15,6 @@
  *
  * Magic delays and register offsets below are taken from the original
  * r8187 driver sources.  Thanks to Realtek for their support!
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/usb.h>
@@ -43,7 +40,7 @@ MODULE_AUTHOR("Larry Finger <Larry.Finger@lwfinger.net>");
 MODULE_DESCRIPTION("RTL8187/RTL8187B USB wireless driver");
 MODULE_LICENSE("GPL");
 
-static struct usb_device_id rtl8187_table[] = {
+static const struct usb_device_id rtl8187_table[] = {
 	/* Asus */
 	{USB_DEVICE(0x0b05, 0x171d), .driver_info = DEVICE_RTL8187},
 	/* Belkin */
@@ -132,7 +129,7 @@ static void rtl8187_iowrite_async(struct rtl8187_priv *priv, __le16 addr,
 	} *buf;
 	int rc;
 
-	buf = kmalloc(sizeof(*buf), GFP_ATOMIC);
+	buf = kmalloc_obj(*buf, GFP_ATOMIC);
 	if (!buf)
 		return;
 
@@ -278,8 +275,7 @@ static void rtl8187_tx(struct ieee80211_hw *dev,
 	}
 
 	if (!priv->is_rtl8187b) {
-		struct rtl8187_tx_hdr *hdr =
-			(struct rtl8187_tx_hdr *)skb_push(skb, sizeof(*hdr));
+		struct rtl8187_tx_hdr *hdr = skb_push(skb, sizeof(*hdr));
 		hdr->flags = cpu_to_le32(flags);
 		hdr->len = 0;
 		hdr->rts_duration = rts_dur;
@@ -292,8 +288,7 @@ static void rtl8187_tx(struct ieee80211_hw *dev,
 		unsigned int epmap[4] = { 6, 7, 5, 4 };
 		u16 fc = le16_to_cpu(tx_hdr->frame_control);
 
-		struct rtl8187b_tx_hdr *hdr =
-			(struct rtl8187b_tx_hdr *)skb_push(skb, sizeof(*hdr));
+		struct rtl8187b_tx_hdr *hdr = skb_push(skb, sizeof(*hdr));
 		struct ieee80211_rate *txrate =
 			ieee80211_get_tx_rate(dev, info);
 		memset(hdr, 0, sizeof(*hdr));
@@ -343,14 +338,16 @@ static void rtl8187_rx_cb(struct urb *urb)
 	spin_unlock_irqrestore(&priv->rx_queue.lock, f);
 	skb_put(skb, urb->actual_length);
 
-	if (unlikely(urb->status)) {
-		dev_kfree_skb_irq(skb);
-		return;
-	}
+	if (unlikely(urb->status))
+		goto free_skb;
 
 	if (!priv->is_rtl8187b) {
-		struct rtl8187_rx_hdr *hdr =
-			(typeof(hdr))(skb_tail_pointer(skb) - sizeof(*hdr));
+		struct rtl8187_rx_hdr *hdr;
+
+		if (skb->len < sizeof(struct rtl8187_rx_hdr))
+			goto free_skb;
+
+		hdr = (typeof(hdr))(skb_tail_pointer(skb) - sizeof(*hdr));
 		flags = le32_to_cpu(hdr->flags);
 		/* As with the RTL8187B below, the AGC is used to calculate
 		 * signal strength. In this case, the scaling
@@ -360,8 +357,12 @@ static void rtl8187_rx_cb(struct urb *urb)
 		rx_status.antenna = (hdr->signal >> 7) & 1;
 		rx_status.mactime = le64_to_cpu(hdr->mac_time);
 	} else {
-		struct rtl8187b_rx_hdr *hdr =
-			(typeof(hdr))(skb_tail_pointer(skb) - sizeof(*hdr));
+		struct rtl8187b_rx_hdr *hdr;
+
+		if (skb->len < sizeof(struct rtl8187b_rx_hdr))
+			goto free_skb;
+
+		hdr = (typeof(hdr))(skb_tail_pointer(skb) - sizeof(*hdr));
 		/* The Realtek datasheet for the RTL8187B shows that the RX
 		 * header contains the following quantities: signal quality,
 		 * RSSI, AGC, the received power in dB, and the measured SNR.
@@ -389,7 +390,7 @@ static void rtl8187_rx_cb(struct urb *urb)
 	rx_status.band = dev->conf.chandef.chan->band;
 	rx_status.flag |= RX_FLAG_MACTIME_START;
 	if (flags & RTL818X_RX_DESC_FLAG_SPLCP)
-		rx_status.flag |= RX_FLAG_SHORTPRE;
+		rx_status.enc_flags |= RX_ENC_FLAG_SHORTPRE;
 	if (flags & RTL818X_RX_DESC_FLAG_CRC32_ERR)
 		rx_status.flag |= RX_FLAG_FAILED_FCS_CRC;
 	memcpy(IEEE80211_SKB_RXCB(skb), &rx_status, sizeof(rx_status));
@@ -414,6 +415,11 @@ static void rtl8187_rx_cb(struct urb *urb)
 		skb_unlink(skb, &priv->rx_queue);
 		dev_kfree_skb_irq(skb);
 	}
+	return;
+
+free_skb:
+	dev_kfree_skb_irq(skb);
+	return;
 }
 
 static int rtl8187_init_urbs(struct ieee80211_hw *dev)
@@ -446,12 +452,13 @@ static int rtl8187_init_urbs(struct ieee80211_hw *dev)
 		skb_queue_tail(&priv->rx_queue, skb);
 		usb_anchor_urb(entry, &priv->anchored);
 		ret = usb_submit_urb(entry, GFP_KERNEL);
-		usb_put_urb(entry);
 		if (ret) {
 			skb_unlink(skb, &priv->rx_queue);
 			usb_unanchor_urb(entry);
+			usb_put_urb(entry);
 			goto err;
 		}
+		usb_put_urb(entry);
 	}
 	return ret;
 
@@ -501,7 +508,7 @@ static void rtl8187b_status_cb(struct urb *urb)
 	if (cmd_type == 1) {
 		unsigned int pkt_rc, seq_no;
 		bool tok;
-		struct sk_buff *skb;
+		struct sk_buff *skb, *iter;
 		struct ieee80211_hdr *ieee80211hdr;
 		unsigned long flags;
 
@@ -510,8 +517,9 @@ static void rtl8187b_status_cb(struct urb *urb)
 		seq_no = (val >> 16) & 0xFFF;
 
 		spin_lock_irqsave(&priv->b_tx_status.queue.lock, flags);
-		skb_queue_reverse_walk(&priv->b_tx_status.queue, skb) {
-			ieee80211hdr = (struct ieee80211_hdr *)skb->data;
+		skb = NULL;
+		skb_queue_reverse_walk(&priv->b_tx_status.queue, iter) {
+			ieee80211hdr = (struct ieee80211_hdr *)iter->data;
 
 			/*
 			 * While testing, it was discovered that the seq_no
@@ -524,10 +532,12 @@ static void rtl8187b_status_cb(struct urb *urb)
 			 * it's unlikely we wrongly ack some sent data
 			 */
 			if ((le16_to_cpu(ieee80211hdr->seq_ctrl)
-			    & 0xFFF) == seq_no)
+			     & 0xFFF) == seq_no) {
+				skb = iter;
 				break;
+			}
 		}
-		if (skb != (struct sk_buff *) &priv->b_tx_status.queue) {
+		if (skb) {
 			struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 
 			__skb_unlink(skb, &priv->b_tx_status.queue);
@@ -946,8 +956,7 @@ static int rtl8187_start(struct ieee80211_hw *dev)
 		      (7 << 13 /* RX FIFO threshold NONE */) |
 		      (7 << 10 /* MAX RX DMA */) |
 		      RTL818X_RX_CONF_RX_AUTORESETPHY |
-		      RTL818X_RX_CONF_ONLYERLPKT |
-		      RTL818X_RX_CONF_MULTICAST;
+		      RTL818X_RX_CONF_ONLYERLPKT;
 		priv->rx_conf = reg;
 		rtl818x_iowrite32(priv, &priv->map->RX_CONF, reg);
 
@@ -1021,7 +1030,7 @@ rtl8187_start_exit:
 	return ret;
 }
 
-static void rtl8187_stop(struct ieee80211_hw *dev)
+static void rtl8187_stop(struct ieee80211_hw *dev, bool suspend)
 {
 	struct rtl8187_priv *priv = dev->priv;
 	struct sk_buff *skb;
@@ -1043,10 +1052,11 @@ static void rtl8187_stop(struct ieee80211_hw *dev)
 	rtl818x_iowrite8(priv, &priv->map->CONFIG4, reg | RTL818X_CONFIG4_VCOOFF);
 	rtl818x_iowrite8(priv, &priv->map->EEPROM_CMD, RTL818X_EEPROM_CMD_NORMAL);
 
+	usb_kill_anchored_urbs(&priv->anchored);
+
 	while ((skb = skb_dequeue(&priv->b_tx_status.queue)))
 		dev_kfree_skb_any(skb);
 
-	usb_kill_anchored_urbs(&priv->anchored);
 	mutex_unlock(&priv->conf_mutex);
 
 	if (!priv->is_rtl8187b)
@@ -1077,7 +1087,7 @@ static void rtl8187_beacon_work(struct work_struct *work)
 		goto resched;
 
 	/* grab a fresh beacon */
-	skb = ieee80211_beacon_get(dev, vif);
+	skb = ieee80211_beacon_get(dev, vif, 0);
 	if (!skb)
 		goto resched;
 
@@ -1153,7 +1163,7 @@ static void rtl8187_remove_interface(struct ieee80211_hw *dev,
 	mutex_unlock(&priv->conf_mutex);
 }
 
-static int rtl8187_config(struct ieee80211_hw *dev, u32 changed)
+static int rtl8187_config(struct ieee80211_hw *dev, int radio_idx, u32 changed)
 {
 	struct rtl8187_priv *priv = dev->priv;
 	struct ieee80211_conf *conf = &dev->conf;
@@ -1253,7 +1263,7 @@ static void rtl8187_conf_erp(struct rtl8187_priv *priv, bool use_short_slot,
 static void rtl8187_bss_info_changed(struct ieee80211_hw *dev,
 				     struct ieee80211_vif *vif,
 				     struct ieee80211_bss_conf *info,
-				     u32 changed)
+				     u64 changed)
 {
 	struct rtl8187_priv *priv = dev->priv;
 	struct rtl8187_vif *vif_priv;
@@ -1319,12 +1329,11 @@ static void rtl8187_configure_filter(struct ieee80211_hw *dev,
 		priv->rx_conf ^= RTL818X_RX_CONF_FCS;
 	if (changed_flags & FIF_CONTROL)
 		priv->rx_conf ^= RTL818X_RX_CONF_CTRL;
-	if (changed_flags & FIF_OTHER_BSS)
-		priv->rx_conf ^= RTL818X_RX_CONF_MONITOR;
-	if (*total_flags & FIF_ALLMULTI || multicast > 0)
-		priv->rx_conf |= RTL818X_RX_CONF_MULTICAST;
+	if (*total_flags & FIF_OTHER_BSS ||
+	    *total_flags & FIF_ALLMULTI || multicast > 0)
+		priv->rx_conf |= RTL818X_RX_CONF_MONITOR;
 	else
-		priv->rx_conf &= ~RTL818X_RX_CONF_MULTICAST;
+		priv->rx_conf &= ~RTL818X_RX_CONF_MONITOR;
 
 	*total_flags = 0;
 
@@ -1332,16 +1341,17 @@ static void rtl8187_configure_filter(struct ieee80211_hw *dev,
 		*total_flags |= FIF_FCSFAIL;
 	if (priv->rx_conf & RTL818X_RX_CONF_CTRL)
 		*total_flags |= FIF_CONTROL;
-	if (priv->rx_conf & RTL818X_RX_CONF_MONITOR)
+	if (priv->rx_conf & RTL818X_RX_CONF_MONITOR) {
 		*total_flags |= FIF_OTHER_BSS;
-	if (priv->rx_conf & RTL818X_RX_CONF_MULTICAST)
 		*total_flags |= FIF_ALLMULTI;
+	}
 
 	rtl818x_iowrite32_async(priv, &priv->map->RX_CONF, priv->rx_conf);
 }
 
 static int rtl8187_conf_tx(struct ieee80211_hw *dev,
-			   struct ieee80211_vif *vif, u16 queue,
+			   struct ieee80211_vif *vif,
+			   unsigned int link_id, u16 queue,
 			   const struct ieee80211_tx_queue_params *params)
 {
 	struct rtl8187_priv *priv = dev->priv;
@@ -1379,7 +1389,12 @@ static int rtl8187_conf_tx(struct ieee80211_hw *dev,
 
 
 static const struct ieee80211_ops rtl8187_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx			= rtl8187_tx,
+	.wake_tx_queue		= ieee80211_handle_wake_tx_queue,
 	.start			= rtl8187_start,
 	.stop			= rtl8187_stop,
 	.add_interface		= rtl8187_add_interface,
@@ -1430,7 +1445,7 @@ static int rtl8187_probe(struct usb_interface *intf,
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct ieee80211_hw *dev;
 	struct rtl8187_priv *priv;
-	struct eeprom_93cx6 eeprom;
+	struct eeprom_93cx6 eeprom = {};
 	struct ieee80211_channel *channel;
 	const char *chip_name;
 	u16 txpwr, reg;
@@ -1448,18 +1463,17 @@ static int rtl8187_probe(struct usb_interface *intf,
 	priv->is_rtl8187b = (id->driver_info == DEVICE_RTL8187B);
 
 	/* allocate "DMA aware" buffer for register accesses */
-	priv->io_dmabuf = kmalloc(sizeof(*priv->io_dmabuf), GFP_KERNEL);
+	priv->io_dmabuf = kmalloc_obj(*priv->io_dmabuf);
 	if (!priv->io_dmabuf) {
 		err = -ENOMEM;
 		goto err_free_dev;
 	}
 	mutex_init(&priv->io_mutex);
+	mutex_init(&priv->conf_mutex);
 
 	SET_IEEE80211_DEV(dev, &intf->dev);
 	usb_set_intfdata(intf, dev);
 	priv->udev = udev;
-
-	usb_get_dev(udev);
 
 	skb_queue_head_init(&priv->rx_queue);
 
@@ -1609,6 +1623,8 @@ static int rtl8187_probe(struct usb_interface *intf,
 	dev->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
 				      BIT(NL80211_IFTYPE_ADHOC) ;
 
+	wiphy_ext_feature_set(dev->wiphy, NL80211_EXT_FEATURE_CQM_RSSI_LIST);
+
 	if ((id->driver_info == DEVICE_RTL8187) && priv->is_rtl8187b)
 		printk(KERN_INFO "rtl8187: inconsistency between id with OEM"
 		       " info!\n");
@@ -1627,7 +1643,6 @@ static int rtl8187_probe(struct usb_interface *intf,
 		printk(KERN_ERR "rtl8187: Cannot register device\n");
 		goto err_free_dmabuf;
 	}
-	mutex_init(&priv->conf_mutex);
 	skb_queue_head_init(&priv->b_tx_status.queue);
 
 	wiphy_info(dev->wiphy, "hwaddr %pM, %s V%d + %s, rfkill mask %d\n",
@@ -1646,7 +1661,6 @@ static int rtl8187_probe(struct usb_interface *intf,
  err_free_dmabuf:
 	kfree(priv->io_dmabuf);
 	usb_set_intfdata(intf, NULL);
-	usb_put_dev(udev);
  err_free_dev:
 	ieee80211_free_hw(dev);
 	return err;
@@ -1668,7 +1682,6 @@ static void rtl8187_disconnect(struct usb_interface *intf)
 
 	priv = dev->priv;
 	usb_reset_device(priv->udev);
-	usb_put_dev(interface_to_usbdev(intf));
 	kfree(priv->io_dmabuf);
 	ieee80211_free_hw(dev);
 }

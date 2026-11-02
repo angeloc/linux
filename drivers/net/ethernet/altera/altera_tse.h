@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Altera Triple-Speed Ethernet MAC driver
  * Copyright (C) 2008-2014 Altera Corporation. All rights reserved
  *
@@ -14,18 +15,6 @@
  *
  * Original driver contributed by SLS.
  * Major updates contributed by GlobalLogic
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef __ALTERA_TSE_H__
@@ -38,6 +27,7 @@
 #include <linux/list.h>
 #include <linux/netdevice.h>
 #include <linux/phy.h>
+#include <linux/phylink.h>
 
 #define ALTERA_TSE_SW_RESET_WATCHDOG_CNTR	10000
 #define ALTERA_TSE_MAC_FIFO_WIDTH		4	/* TX/RX FIFO width in
@@ -411,9 +401,6 @@ struct altera_tse_private {
 	/* MAC address space */
 	struct altera_tse_mac __iomem *mac_dev;
 
-	/* TSE Revision */
-	u32	revision;
-
 	/* mSGDMA Rx Dispatcher address space */
 	void __iomem *rx_dma_csr;
 	void __iomem *rx_dma_desc;
@@ -422,6 +409,9 @@ struct altera_tse_private {
 	/* mSGDMA Tx Dispatcher address space */
 	void __iomem *tx_dma_csr;
 	void __iomem *tx_dma_desc;
+
+	/* SGMII PCS address space */
+	void __iomem *pcs_base;
 
 	/* Rx buffers queue */
 	struct tse_buffer *rx_ring;
@@ -443,7 +433,6 @@ struct altera_tse_private {
 	/* RX/TX MAC FIFO configs */
 	u32 tx_fifo_depth;
 	u32 rx_fifo_depth;
-	u32 max_mtu;
 
 	/* Hash filter settings */
 	u32 hash_filter;
@@ -480,7 +469,11 @@ struct altera_tse_private {
 	/* ethtool msglvl option */
 	u32 msg_enable;
 
-	struct altera_dmaops *dmaops;
+	const struct altera_dmaops *dmaops;
+
+	struct phylink *phylink;
+	struct phylink_config phylink_config;
+	struct phylink_pcs *pcs;
 };
 
 /* Function prototypes

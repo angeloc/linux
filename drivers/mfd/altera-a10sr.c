@@ -1,17 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
+ * Altera Arria10 DevKit System Resource MFD Driver
+ *
+ * Author: Thor Thayer <tthayer@opensource.altera.com>
+ *
  * Copyright Intel Corporation (C) 2014-2016. All Rights Reserved
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * SPI access for Altera Arria10 MAX5 System Resource Chip
  *
@@ -20,6 +13,7 @@
 
 #include <linux/mfd/altera-a10sr.h>
 #include <linux/mfd/core.h>
+#include <linux/init.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/spi/spi.h>
@@ -28,6 +22,10 @@ static const struct mfd_cell altr_a10sr_subdev_info[] = {
 	{
 		.name = "altr_a10sr_gpio",
 		.of_compatible = "altr,a10sr-gpio",
+	},
+	{
+		.name = "altr_a10sr_reset",
+		.of_compatible = "altr,a10sr-reset",
 	},
 };
 
@@ -94,13 +92,14 @@ static bool altr_a10sr_reg_volatile(struct device *dev, unsigned int reg)
 	}
 }
 
-const struct regmap_config altr_a10sr_regmap_config = {
+static const struct regmap_config altr_a10sr_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 
 	.cache_type = REGCACHE_NONE,
 
-	.use_single_rw = true,
+	.use_single_read = true,
+	.use_single_write = true,
 	.read_flag_mask = 1,
 	.write_flag_mask = 0,
 
@@ -154,16 +153,18 @@ static const struct of_device_id altr_a10sr_spi_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, altr_a10sr_spi_of_match);
 
+static const struct spi_device_id altr_a10sr_spi_ids[] = {
+	{ .name = "a10sr" },
+	{ }
+};
+MODULE_DEVICE_TABLE(spi, altr_a10sr_spi_ids);
+
 static struct spi_driver altr_a10sr_spi_driver = {
 	.probe = altr_a10sr_spi_probe,
 	.driver = {
 		.name = "altr_a10sr",
-		.of_match_table = of_match_ptr(altr_a10sr_spi_of_match),
+		.of_match_table = altr_a10sr_spi_of_match,
 	},
+	.id_table = altr_a10sr_spi_ids,
 };
-
-module_spi_driver(altr_a10sr_spi_driver);
-
-MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("Thor Thayer <tthayer@opensource.altera.com>");
-MODULE_DESCRIPTION("Altera Arria10 DevKit System Resource MFD Driver");
+builtin_driver(altr_a10sr_spi_driver, spi_register_driver)

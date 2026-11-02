@@ -1,16 +1,21 @@
-TEST_PROGS := gettimeofday context_switch mmap_bench futex_bench
+# SPDX-License-Identifier: GPL-2.0
+TEST_GEN_PROGS := gettimeofday context_switch fork mmap_bench futex_bench null_syscall
+TEST_GEN_FILES := exec_target
+
+TEST_FILES := settings
+
+top_srcdir = ../../../../..
+include ../../lib.mk
+include ../flags.mk
 
 CFLAGS += -O2
 
-all: $(TEST_PROGS)
+$(TEST_GEN_PROGS): ../harness.c
 
-$(TEST_PROGS): ../harness.c
+$(OUTPUT)/context_switch: ../utils.c
+$(OUTPUT)/context_switch: CFLAGS += -maltivec -mvsx -mabi=altivec
+$(OUTPUT)/context_switch: LDLIBS += -lpthread
 
-context_switch: ../utils.c
-context_switch: CFLAGS += -maltivec -mvsx -mabi=altivec
-context_switch: LDLIBS += -lpthread
+$(OUTPUT)/fork: LDLIBS += -lpthread
 
-include ../../lib.mk
-
-clean:
-	rm -f $(TEST_PROGS) *.o
+$(OUTPUT)/exec_target: CFLAGS += -nostartfiles

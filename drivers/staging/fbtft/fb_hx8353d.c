@@ -1,18 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * FB driver for the HX8353D LCD Controller
  *
  * Copyright (c) 2014 Petr Olivka
  * Copyright (c) 2013 Noralf Tronnes
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -70,18 +61,6 @@ static int init_display(struct fbtft_par *par)
 	return 0;
 };
 
-static void set_addr_win(struct fbtft_par *par, int xs, int ys, int xe, int ye)
-{
-	/* column address */
-	write_reg(par, 0x2a, xs >> 8, xs & 0xff, xe >> 8, xe & 0xff);
-
-	/* Row address */
-	write_reg(par, 0x2b, ys >> 8, ys & 0xff, ye >> 8, ye & 0xff);
-
-	/* memory write */
-	write_reg(par, 0x2c);
-}
-
 #define my BIT(7)
 #define mx BIT(6)
 #define mv BIT(5)
@@ -118,7 +97,7 @@ static int set_var(struct fbtft_par *par)
 }
 
 /* gamma string format: */
-static int set_gamma(struct fbtft_par *par, unsigned long *curves)
+static int set_gamma(struct fbtft_par *par, u32 *curves)
 {
 	write_reg(par, 0xE0,
 		  curves[0], curves[1], curves[2], curves[3],
@@ -139,7 +118,6 @@ static struct fbtft_display display = {
 	.gamma = DEFAULT_GAMMA,
 	.fbtftops = {
 		.init_display = init_display,
-		.set_addr_win = set_addr_win,
 		.set_var = set_var,
 		.set_gamma = set_gamma,
 	},

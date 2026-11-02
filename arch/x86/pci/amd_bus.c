@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/topology.h>
 #include <linux/cpu.h>
 #include <linux/range.h>
 
-#include <asm/amd_nb.h>
+#include <asm/amd/nb.h>
 #include <asm/pci_x86.h>
 
 #include <asm/pci-direct.h>
@@ -50,6 +51,14 @@ static struct pci_root_info __init *find_pci_root_info(int node, int link)
 	return NULL;
 }
 
+static inline resource_size_t cap_resource(u64 val)
+{
+	if (val > RESOURCE_SIZE_MAX)
+		return RESOURCE_SIZE_MAX;
+
+	return val;
+}
+
 /**
  * early_root_info_init()
  * called before pcibios_scan_root and pci_scan_bus
@@ -92,7 +101,8 @@ static int __init early_root_info_init(void)
 		vendor = id & 0xffff;
 		device = (id>>16) & 0xffff;
 
-		if (vendor != PCI_VENDOR_ID_AMD)
+		if (vendor != PCI_VENDOR_ID_AMD &&
+		    vendor != PCI_VENDOR_ID_HYGON)
 			continue;
 
 		if (hb_probes[i].device == device) {
@@ -124,7 +134,7 @@ static int __init early_root_info_init(void)
 		node = (reg >> 4) & 0x07;
 		link = (reg >> 8) & 0x03;
 
-		info = alloc_pci_root_info(min_bus, max_bus, node, link);
+		alloc_pci_root_info(min_bus, max_bus, node, link);
 	}
 
 	/*
@@ -192,7 +202,7 @@ static int __init early_root_info_init(void)
 
 	/* need to take out [0, TOM) for RAM*/
 	address = MSR_K8_TOP_MEM1;
-	rdmsrl(address, val);
+	rdmsrq(address, val);
 	end = (val & 0xffffff800000ULL);
 	printk(KERN_INFO "TOM: %016llx aka %lldM\n", end, end>>20);
 	if (end < (1ULL<<32))
@@ -282,13 +292,13 @@ static int __init early_root_info_init(void)
 
 	/* need to take out [4G, TOM2) for RAM*/
 	/* SYS_CFG */
-	address = MSR_K8_SYSCFG;
-	rdmsrl(address, val);
+	address = MSR_AMD64_SYSCFG;
+	rdmsrq(address, val);
 	/* TOP_MEM2 is enabled? */
 	if (val & (1<<21)) {
 		/* TOP_MEM2 */
 		address = MSR_K8_TOP_MEM2;
-		rdmsrl(address, val);
+		rdmsrq(address, val);
 		end = (val & 0xffffff800000ULL);
 		printk(KERN_INFO "TOM2: %016llx aka %lldM\n", end, end>>20);
 		subtract_range(range, RANGE_NUM, 1ULL<<32, end);
@@ -327,34 +337,17 @@ static int __init early_root_info_init(void)
 
 #define ENABLE_CF8_EXT_CFG      (1ULL << 46)
 
-static void enable_pci_io_ecs(void *unused)
+static int amd_bus_cpu_online(unsigned int cpu)
 {
 	u64 reg;
-	rdmsrl(MSR_AMD64_NB_CFG, reg);
+
+	rdmsrq(MSR_AMD64_NB_CFG, reg);
 	if (!(reg & ENABLE_CF8_EXT_CFG)) {
 		reg |= ENABLE_CF8_EXT_CFG;
-		wrmsrl(MSR_AMD64_NB_CFG, reg);
+		wrmsrq(MSR_AMD64_NB_CFG, reg);
 	}
+	return 0;
 }
-
-static int amd_cpu_notify(struct notifier_block *self, unsigned long action,
-			  void *hcpu)
-{
-	int cpu = (long)hcpu;
-	switch (action) {
-	case CPU_ONLINE:
-	case CPU_ONLINE_FROZEN:
-		smp_call_function_single(cpu, enable_pci_io_ecs, NULL, 0);
-		break;
-	default:
-		break;
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block amd_cpu_notifier = {
-	.notifier_call	= amd_cpu_notify,
-};
 
 static void __init pci_enable_pci_io_ecs(void)
 {
@@ -385,7 +378,7 @@ static void __init pci_enable_pci_io_ecs(void)
 
 static int __init pci_io_ecs_init(void)
 {
-	int cpu;
+	int ret;
 
 	/* assume all cpus from fam10h have IO ECS */
 	if (boot_cpu_data.x86 < 0x10)
@@ -395,12 +388,9 @@ static int __init pci_io_ecs_init(void)
 	if (early_pci_allowed())
 		pci_enable_pci_io_ecs();
 
-	cpu_notifier_register_begin();
-	for_each_online_cpu(cpu)
-		amd_cpu_notify(&amd_cpu_notifier, (unsigned long)CPU_ONLINE,
-			       (void *)(long)cpu);
-	__register_cpu_notifier(&amd_cpu_notifier);
-	cpu_notifier_register_done();
+	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "pci/amd_bus:online",
+				amd_bus_cpu_online, NULL);
+	WARN_ON(ret < 0);
 
 	pci_probe |= PCI_HAS_IO_ECS;
 
@@ -409,7 +399,8 @@ static int __init pci_io_ecs_init(void)
 
 static int __init amd_postcore_init(void)
 {
-	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD)
+	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD &&
+	    boot_cpu_data.x86_vendor != X86_VENDOR_HYGON)
 		return 0;
 
 	early_root_info_init();

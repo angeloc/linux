@@ -243,7 +243,7 @@ static int cxgb_ulp_iscsi_ctl(struct adapter *adapter, unsigned int req,
 
 		/*
 		 * on rx, the iscsi pdu has to be < rx page size and the
-		 * the max rx data length programmed in TP
+		 * max rx data length programmed in TP
 		 */
 		val = min(adapter->params.tp.rx_pg_size,
 			  ((t3_read_reg(adapter, A_TP_PARA_REG2)) >>
@@ -515,23 +515,6 @@ void *cxgb3_free_atid(struct t3cdev *tdev, int atid)
 
 EXPORT_SYMBOL(cxgb3_free_atid);
 
-/*
- * Free a server TID and return it to the free pool.
- */
-void cxgb3_free_stid(struct t3cdev *tdev, int stid)
-{
-	struct tid_info *t = &(T3C_DATA(tdev))->tid_maps;
-	union listen_entry *p = stid2entry(t, stid);
-
-	spin_lock_bh(&t->stid_lock);
-	p->next = t->sfree;
-	t->sfree = p;
-	t->stids_in_use--;
-	spin_unlock_bh(&t->stid_lock);
-}
-
-EXPORT_SYMBOL(cxgb3_free_stid);
-
 void cxgb3_insert_tid(struct t3cdev *tdev, struct cxgb3_client *client,
 		      void *ctx, unsigned int tid)
 {
@@ -552,7 +535,7 @@ static inline void mk_tid_release(struct sk_buff *skb, unsigned int tid)
 	struct cpl_tid_release *req;
 
 	skb->priority = CPL_PRIORITY_SETUP;
-	req = (struct cpl_tid_release *)__skb_put(skb, sizeof(*req));
+	req = __skb_put(skb, sizeof(*req));
 	req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 	OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_TID_RELEASE, tid));
 }
@@ -670,28 +653,6 @@ int cxgb3_alloc_atid(struct t3cdev *tdev, struct cxgb3_client *client,
 }
 
 EXPORT_SYMBOL(cxgb3_alloc_atid);
-
-int cxgb3_alloc_stid(struct t3cdev *tdev, struct cxgb3_client *client,
-		     void *ctx)
-{
-	int stid = -1;
-	struct tid_info *t = &(T3C_DATA(tdev))->tid_maps;
-
-	spin_lock_bh(&t->stid_lock);
-	if (t->sfree) {
-		union listen_entry *p = t->sfree;
-
-		stid = (p - t->stid_tab) + t->stid_base;
-		t->sfree = p->next;
-		p->t3c_tid.ctx = ctx;
-		p->t3c_tid.client = client;
-		t->stids_in_use++;
-	}
-	spin_unlock_bh(&t->stid_lock);
-	return stid;
-}
-
-EXPORT_SYMBOL(cxgb3_alloc_stid);
 
 /* Get the t3cdev associated with a net_device */
 struct t3cdev *dev2t3cdev(struct net_device *dev)
@@ -1096,7 +1057,7 @@ static void set_l2t_ix(struct t3cdev *tdev, u32 tid, struct l2t_entry *e)
 		return;
 	}
 	skb->priority = CPL_PRIORITY_CONTROL;
-	req = (struct cpl_set_tcb_field *)skb_put(skb, sizeof(*req));
+	req = skb_put(skb, sizeof(*req));
 	req->wr.wr_hi = htonl(V_WR_OP(FW_WROPCODE_FORWARD));
 	OPCODE_TID(req) = htonl(MK_OPCODE_TID(CPL_SET_TCB_FIELD, tid));
 	req->reply = 0;
@@ -1152,27 +1113,6 @@ static void cxgb_redirect(struct dst_entry *old, struct dst_entry *new,
 }
 
 /*
- * Allocate a chunk of memory using kmalloc or, if that fails, vmalloc.
- * The allocated memory is cleared.
- */
-void *cxgb_alloc_mem(unsigned long size)
-{
-	void *p = kzalloc(size, GFP_KERNEL | __GFP_NOWARN);
-
-	if (!p)
-		p = vzalloc(size);
-	return p;
-}
-
-/*
- * Free memory allocated through t3_alloc_mem().
- */
-void cxgb_free_mem(void *addr)
-{
-	kvfree(addr);
-}
-
-/*
  * Allocate and initialize the TID tables.  Returns 0 on success.
  */
 static int init_tid_tabs(struct tid_info *t, unsigned int ntids,
@@ -1182,7 +1122,7 @@ static int init_tid_tabs(struct tid_info *t, unsigned int ntids,
 	unsigned long size = ntids * sizeof(*t->tid_tab) +
 	    natids * sizeof(*t->atid_tab) + nstids * sizeof(*t->stid_tab);
 
-	t->tid_tab = cxgb_alloc_mem(size);
+	t->tid_tab = kvzalloc(size, GFP_KERNEL);
 	if (!t->tid_tab)
 		return -ENOMEM;
 
@@ -1218,7 +1158,7 @@ static int init_tid_tabs(struct tid_info *t, unsigned int ntids,
 
 static void free_tid_maps(struct tid_info *t)
 {
-	cxgb_free_mem(t->tid_tab);
+	kvfree(t->tid_tab);
 }
 
 static inline void add_adapter(struct adapter *adap)
@@ -1245,7 +1185,7 @@ int cxgb3_offload_activate(struct adapter *adapter)
 	unsigned int l2t_capacity;
 	struct l2t_data *l2td;
 
-	t = kzalloc(sizeof(*t), GFP_KERNEL);
+	t = kzalloc_obj(*t);
 	if (!t)
 		return -ENOMEM;
 
@@ -1293,7 +1233,7 @@ int cxgb3_offload_activate(struct adapter *adapter)
 	return 0;
 
 out_free_l2t:
-	t3_free_l2t(l2td);
+	kvfree(l2td);
 out_free:
 	kfree(t);
 	return err;
@@ -1302,7 +1242,7 @@ out_free:
 static void clean_l2_data(struct rcu_head *head)
 {
 	struct l2t_data *d = container_of(head, struct l2t_data, rcu_head);
-	t3_free_l2t(d);
+	kvfree(d);
 }
 
 
@@ -1323,8 +1263,7 @@ void cxgb3_offload_deactivate(struct adapter *adapter)
 	rcu_read_unlock();
 	RCU_INIT_POINTER(tdev->l2opt, NULL);
 	call_rcu(&d->rcu_head, clean_l2_data);
-	if (t->nofail_skb)
-		kfree_skb(t->nofail_skb);
+	kfree_skb(t->nofail_skb);
 	kfree(t);
 }
 

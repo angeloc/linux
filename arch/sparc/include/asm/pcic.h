@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * pcic.h: JavaEngine 1 specific PCI definitions.
  *
@@ -7,7 +8,7 @@
 #ifndef __SPARC_PCIC_H
 #define __SPARC_PCIC_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/types.h>
 #include <linux/smp.h>

@@ -31,7 +31,6 @@
  *
  */
 #include <linux/errno.h>
-#include <linux/module.h>
 #include <linux/pci.h>
 
 #include "usnic_ib.h"
@@ -240,18 +239,13 @@ usnic_vnic_get_resources(struct usnic_vnic *vnic, enum usnic_vnic_res_type type,
 	if (usnic_vnic_res_free_cnt(vnic, type) < cnt || cnt < 0 || !owner)
 		return ERR_PTR(-EINVAL);
 
-	ret = kzalloc(sizeof(*ret), GFP_ATOMIC);
-	if (!ret) {
-		usnic_err("Failed to allocate chunk for %s - Out of memory\n",
-				usnic_vnic_pci_name(vnic));
+	ret = kzalloc_obj(*ret, GFP_ATOMIC);
+	if (!ret)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	if (cnt > 0) {
-		ret->res = kcalloc(cnt, sizeof(*(ret->res)), GFP_ATOMIC);
+		ret->res = kzalloc_objs(*(ret->res), cnt, GFP_ATOMIC);
 		if (!ret->res) {
-			usnic_err("Failed to allocate resources for %s. Out of memory\n",
-					usnic_vnic_pci_name(vnic));
 			kfree(ret);
 			return ERR_PTR(-ENOMEM);
 		}
@@ -311,16 +305,18 @@ static int usnic_vnic_alloc_res_chunk(struct usnic_vnic *vnic,
 	struct usnic_vnic_res *res;
 
 	cnt = vnic_dev_get_res_count(vnic->vdev, _to_vnic_res_type(type));
-	if (cnt < 1)
+	if (cnt < 1) {
+		usnic_err("Wrong res count with cnt %d\n", cnt);
 		return -EINVAL;
+	}
 
 	chunk->cnt = chunk->free_cnt = cnt;
-	chunk->res = kzalloc(sizeof(*(chunk->res))*cnt, GFP_KERNEL);
+	chunk->res = kzalloc_objs(*(chunk->res), cnt);
 	if (!chunk->res)
 		return -ENOMEM;
 
 	for (i = 0; i < cnt; i++) {
-		res = kzalloc(sizeof(*res), GFP_KERNEL);
+		res = kzalloc_obj(*res);
 		if (!res) {
 			err = -ENOMEM;
 			goto fail;
@@ -384,12 +380,8 @@ static int usnic_vnic_discover_resources(struct pci_dev *pdev,
 			res_type < USNIC_VNIC_RES_TYPE_MAX; res_type++) {
 		err = usnic_vnic_alloc_res_chunk(vnic, res_type,
 						&vnic->chunks[res_type]);
-		if (err) {
-			usnic_err("Failed to alloc res %s with err %d\n",
-					usnic_vnic_res_type_to_str(res_type),
-					err);
+		if (err)
 			goto out_clean_chunks;
-		}
 	}
 
 	return 0;
@@ -453,12 +445,9 @@ struct usnic_vnic *usnic_vnic_alloc(struct pci_dev *pdev)
 		return ERR_PTR(-EINVAL);
 	}
 
-	vnic = kzalloc(sizeof(*vnic), GFP_KERNEL);
-	if (!vnic) {
-		usnic_err("Failed to alloc vnic for %s - out of memory\n",
-				pci_name(pdev));
+	vnic = kzalloc_obj(*vnic);
+	if (!vnic)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	spin_lock_init(&vnic->res_lock);
 

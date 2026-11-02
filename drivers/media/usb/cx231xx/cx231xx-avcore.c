@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
    cx231xx_avcore.c - driver for Conexant Cx23100/101/102
 		      USB video capture devices
@@ -7,19 +8,6 @@
    This program contains the specific code to control the avdecoder chip and
    other related usb control functions for cx231xx based chipset.
 
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include "cx231xx.h"
@@ -105,7 +93,7 @@ void uninitGPIO(struct cx231xx *dev)
 
 /******************************************************************************
  *                    A F E - B L O C K    C O N T R O L   functions          *
- * 				[ANALOG FRONT END]			      *
+ *				[ANALOG FRONT END]			      *
  ******************************************************************************/
 static int afe_write_byte(struct cx231xx *dev, u16 saddr, u8 data)
 {
@@ -599,14 +587,27 @@ int cx231xx_set_video_input_mux(struct cx231xx *dev, u8 input)
 				return status;
 			}
 		}
-		if (dev->tuner_type == TUNER_NXP_TDA18271)
+		switch (dev->model) { /* i2c device tuners */
+		case CX231XX_BOARD_HAUPPAUGE_930C_HD_1114xx:
+		case CX231XX_BOARD_HAUPPAUGE_935C:
+		case CX231XX_BOARD_HAUPPAUGE_955Q:
+		case CX231XX_BOARD_HAUPPAUGE_975:
+		case CX231XX_BOARD_EVROMEDIA_FULL_HYBRID_FULLHD:
 			status = cx231xx_set_decoder_video_input(dev,
 							CX231XX_VMUX_TELEVISION,
 							INPUT(input)->vmux);
-		else
-			status = cx231xx_set_decoder_video_input(dev,
+			break;
+		default:
+			if (dev->tuner_type == TUNER_NXP_TDA18271)
+				status = cx231xx_set_decoder_video_input(dev,
+							CX231XX_VMUX_TELEVISION,
+							INPUT(input)->vmux);
+			else
+				status = cx231xx_set_decoder_video_input(dev,
 							CX231XX_VMUX_COMPOSITE1,
 							INPUT(input)->vmux);
+			break;
+		}
 
 		break;
 	default:
@@ -622,7 +623,7 @@ int cx231xx_set_video_input_mux(struct cx231xx *dev, u8 input)
 }
 
 int cx231xx_set_decoder_video_input(struct cx231xx *dev,
-				u8 pin_type, u8 input)
+				u8 pin_type, u32 input)
 {
 	int status = 0;
 	u32 value = 0;
@@ -1205,12 +1206,22 @@ int cx231xx_set_audio_decoder_input(struct cx231xx *dev,
 					cx231xx_set_field(FLD_SIF_EN, 0));
 			break;
 		default:
+			switch (dev->model) { /* i2c device tuners */
+			case CX231XX_BOARD_HAUPPAUGE_930C_HD_1114xx:
+			case CX231XX_BOARD_HAUPPAUGE_935C:
+			case CX231XX_BOARD_HAUPPAUGE_955Q:
+			case CX231XX_BOARD_HAUPPAUGE_975:
+			case CX231XX_BOARD_EVROMEDIA_FULL_HYBRID_FULLHD:
+			/* TODO: Normal mode: SIF passthrough at 14.32 MHz?? */
+				break;
+			default:
 			/* This is just a casual suggestion to people adding
 			   new boards in case they use a tuner type we don't
 			   currently know about */
-			dev_info(dev->dev,
-				 "Unknown tuner type configuring SIF");
-			break;
+				dev_info(dev->dev,
+					 "Unknown tuner type configuring SIF");
+				break;
+			}
 		}
 		break;
 
@@ -1252,7 +1263,7 @@ int cx231xx_init_ctrl_pin_status(struct cx231xx *dev)
 int cx231xx_set_agc_analog_digital_mux_select(struct cx231xx *dev,
 					      u8 analog_or_digital)
 {
-	int status = 0;
+	int status;
 
 	/* first set the direction to output */
 	status = cx231xx_set_gpio_direction(dev,
@@ -1264,7 +1275,10 @@ int cx231xx_set_agc_analog_digital_mux_select(struct cx231xx *dev,
 				   dev->board.agc_analog_digital_select_gpio,
 				   analog_or_digital);
 
-	return status;
+	if (status < 0)
+		return status;
+
+	return 0;
 }
 
 int cx231xx_enable_i2c_port_3(struct cx231xx *dev, bool is_port_3)
@@ -1323,142 +1337,6 @@ void update_HH_register_after_set_DIF(struct cx231xx *dev)
 	status = vid_blk_read_word(dev, AFE_CTRL_C2HH_SRC_CTRL,  &value);
 */
 }
-
-void cx231xx_dump_HH_reg(struct cx231xx *dev)
-{
-	u32 value = 0;
-	u16  i = 0;
-
-	value = 0x45005390;
-	vid_blk_write_word(dev, 0x104, value);
-
-	for (i = 0x100; i < 0x140; i++) {
-		vid_blk_read_word(dev, i, &value);
-		dev_dbg(dev->dev, "reg0x%x=0x%x\n", i, value);
-		i = i+3;
-	}
-
-	for (i = 0x300; i < 0x400; i++) {
-		vid_blk_read_word(dev, i, &value);
-		dev_dbg(dev->dev, "reg0x%x=0x%x\n", i, value);
-		i = i+3;
-	}
-
-	for (i = 0x400; i < 0x440; i++) {
-		vid_blk_read_word(dev, i,  &value);
-		dev_dbg(dev->dev, "reg0x%x=0x%x\n", i, value);
-		i = i+3;
-	}
-
-	vid_blk_read_word(dev, AFE_CTRL_C2HH_SRC_CTRL, &value);
-	dev_dbg(dev->dev, "AFE_CTRL_C2HH_SRC_CTRL=0x%x\n", value);
-	vid_blk_write_word(dev, AFE_CTRL_C2HH_SRC_CTRL, 0x4485D390);
-	vid_blk_read_word(dev, AFE_CTRL_C2HH_SRC_CTRL, &value);
-	dev_dbg(dev->dev, "AFE_CTRL_C2HH_SRC_CTRL=0x%x\n", value);
-}
-
-#if 0
-static void cx231xx_dump_SC_reg(struct cx231xx *dev)
-{
-	u8 value[4] = { 0, 0, 0, 0 };
-	dev_dbg(dev->dev, "%s!\n", __func__);
-
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, BOARD_CFG_STAT,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", BOARD_CFG_STAT, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, TS_MODE_REG,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", TS_MODE_REG, value[0],
-		 value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, TS1_CFG_REG,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", TS1_CFG_REG, value[0],
-		 value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, TS1_LENGTH_REG,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", TS1_LENGTH_REG, value[0],
-		value[1], value[2], value[3]);
-
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, TS2_CFG_REG,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", TS2_CFG_REG, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, TS2_LENGTH_REG,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", TS2_LENGTH_REG, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, EP_MODE_SET,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", EP_MODE_SET, value[0],
-		 value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_PWR_PTN1,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_PWR_PTN1, value[0],
-		value[1], value[2], value[3]);
-
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_PWR_PTN2,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_PWR_PTN2, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_PWR_PTN3,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_PWR_PTN3, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_PWR_MASK0,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_PWR_MASK0, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_PWR_MASK1,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_PWR_MASK1, value[0],
-		value[1], value[2], value[3]);
-
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_PWR_MASK2,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_PWR_MASK2, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_GAIN,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_GAIN, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_CAR_REG,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_CAR_REG, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_OT_CFG1,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_OT_CFG1, value[0],
-		value[1], value[2], value[3]);
-
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, CIR_OT_CFG2,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", CIR_OT_CFG2, value[0],
-		value[1], value[2], value[3]);
-	cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, PWR_CTL_EN,
-				 value, 4);
-	dev_dbg(dev->dev,
-		"reg0x%x=0x%x 0x%x 0x%x 0x%x\n", PWR_CTL_EN, value[0],
-		value[1], value[2], value[3]);
-}
-#endif
 
 void cx231xx_Setup_AFE_for_LowIF(struct cx231xx *dev)
 
@@ -2046,10 +1924,9 @@ int cx231xx_dif_set_standard(struct cx231xx *dev, u32 standard)
 		status = vid_blk_write_word(dev, DIF_SRC_GAIN_CONTROL,
 						0x000035e8);
 
-		status = vid_blk_write_word(dev, DIF_AGC_CTRL_IF, 0xC2262600);
-		status = vid_blk_write_word(dev, DIF_AGC_CTRL_INT,
-						0xC2262600);
-		status = vid_blk_write_word(dev, DIF_AGC_CTRL_RF, 0xC2262600);
+		status = vid_blk_write_word(dev, DIF_AGC_CTRL_IF,  0xC2262600);
+		status = vid_blk_write_word(dev, DIF_AGC_CTRL_INT, 0xC2260000);
+		status = vid_blk_write_word(dev, DIF_AGC_CTRL_RF,  0xC2260000);
 
 		/* Save the Spec Inversion value */
 		dif_misc_ctrl_value &= FLD_DIF_SPEC_INV;
@@ -2165,7 +2042,7 @@ int cx231xx_tuner_post_channel_change(struct cx231xx *dev)
 }
 
 /******************************************************************************
- *        	    I 2 S - B L O C K    C O N T R O L   functions            *
+ *		    I 2 S - B L O C K    C O N T R O L   functions            *
  ******************************************************************************/
 int cx231xx_i2s_blk_initialize(struct cx231xx *dev)
 {
@@ -2442,30 +2319,6 @@ int cx231xx_set_power_mode(struct cx231xx *dev, enum AV_MODE mode)
 
 	status = cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, PWR_CTL_EN, value,
 				       4);
-
-	return status;
-}
-
-int cx231xx_power_suspend(struct cx231xx *dev)
-{
-	u8 value[4] = { 0, 0, 0, 0 };
-	u32 tmp = 0;
-	int status = 0;
-
-	status = cx231xx_read_ctrl_reg(dev, VRT_GET_REGISTER, PWR_CTL_EN,
-				       value, 4);
-	if (status > 0)
-		return status;
-
-	tmp = le32_to_cpu(*((__le32 *) value));
-	tmp &= (~PWR_MODE_MASK);
-
-	value[0] = (u8) tmp;
-	value[1] = (u8) (tmp >> 8);
-	value[2] = (u8) (tmp >> 16);
-	value[3] = (u8) (tmp >> 24);
-	status = cx231xx_write_ctrl_reg(dev, VRT_SET_REGISTER, PWR_CTL_EN,
-					value, 4);
 
 	return status;
 }
@@ -2747,7 +2600,6 @@ int cx231xx_set_gpio_value(struct cx231xx *dev, int pin_number, int pin_value)
 		dev->gpio_dir = value;
 		status = cx231xx_set_gpio_bit(dev, dev->gpio_dir,
 					      dev->gpio_val);
-		value = 0;
 	}
 
 	if (pin_value == 0)
@@ -2984,7 +2836,7 @@ int cx231xx_gpio_i2c_write_ack(struct cx231xx *dev)
 {
 	int status = 0;
 
-	/* set SDA to ouput */
+	/* set SDA to output */
 	dev->gpio_dir |= 1 << dev->board.tuner_sda_gpio;
 	status = cx231xx_set_gpio_bit(dev, dev->gpio_dir, dev->gpio_val);
 

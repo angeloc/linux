@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Alchemy clocks.
  *
@@ -110,7 +111,7 @@ static struct clk_aliastable {
 /* access locks to SYS_FREQCTRL0/1 and SYS_CLKSRC registers */
 static spinlock_t alchemy_clk_fg0_lock;
 static spinlock_t alchemy_clk_fg1_lock;
-static spinlock_t alchemy_clk_csrc_lock;
+static DEFINE_SPINLOCK(alchemy_clk_csrc_lock);
 
 /* CPU Core clock *****************************************************/
 
@@ -142,28 +143,35 @@ void __init alchemy_set_lpj(void)
 	preset_lpj /= 2 * HZ;
 }
 
-static struct clk_ops alchemy_clkops_cpu = {
+static const struct clk_ops alchemy_clkops_cpu = {
 	.recalc_rate	= alchemy_clk_cpu_recalc,
 };
 
 static struct clk __init *alchemy_clk_setup_cpu(const char *parent_name,
 						int ctype)
 {
-	struct clk_init_data id;
+	struct clk_init_data id = {};
 	struct clk_hw *h;
+	struct clk *clk;
 
-	h = kzalloc(sizeof(*h), GFP_KERNEL);
+	h = kzalloc_obj(*h);
 	if (!h)
 		return ERR_PTR(-ENOMEM);
 
 	id.name = ALCHEMY_CPU_CLK;
 	id.parent_names = &parent_name;
 	id.num_parents = 1;
-	id.flags = CLK_IS_BASIC;
+	id.flags = 0;
 	id.ops = &alchemy_clkops_cpu;
 	h->init = &id;
 
-	return clk_register(NULL, h);
+	clk = clk_register(NULL, h);
+	if (IS_ERR(clk)) {
+		pr_err("failed to register clock\n");
+		kfree(h);
+	}
+
+	return clk;
 }
 
 /* AUXPLLs ************************************************************/
@@ -203,41 +211,45 @@ static int alchemy_clk_aux_setr(struct clk_hw *hw,
 	return 0;
 }
 
-static long alchemy_clk_aux_roundr(struct clk_hw *hw,
-					    unsigned long rate,
-					    unsigned long *parent_rate)
+static int alchemy_clk_aux_determine_rate(struct clk_hw *hw,
+					  struct clk_rate_request *req)
 {
 	struct alchemy_auxpll_clk *a = to_auxpll_clk(hw);
 	unsigned long mult;
 
-	if (!rate || !*parent_rate)
-		return 0;
+	if (!req->rate || !req->best_parent_rate) {
+		req->rate = 0;
 
-	mult = rate / (*parent_rate);
+		return 0;
+	}
+
+	mult = req->rate / req->best_parent_rate;
 
 	if (mult && (mult < 7))
 		mult = 7;
 	if (mult > a->maxmult)
 		mult = a->maxmult;
 
-	return (*parent_rate) * mult;
+	req->rate = req->best_parent_rate * mult;
+
+	return 0;
 }
 
-static struct clk_ops alchemy_clkops_aux = {
+static const struct clk_ops alchemy_clkops_aux = {
 	.recalc_rate	= alchemy_clk_aux_recalc,
 	.set_rate	= alchemy_clk_aux_setr,
-	.round_rate	= alchemy_clk_aux_roundr,
+	.determine_rate = alchemy_clk_aux_determine_rate,
 };
 
 static struct clk __init *alchemy_clk_setup_aux(const char *parent_name,
 						char *name, int maxmult,
 						unsigned long reg)
 {
-	struct clk_init_data id;
+	struct clk_init_data id = {};
 	struct clk *c;
 	struct alchemy_auxpll_clk *a;
 
-	a = kzalloc(sizeof(*a), GFP_KERNEL);
+	a = kzalloc_obj(*a);
 	if (!a)
 		return ERR_PTR(-ENOMEM);
 
@@ -575,7 +587,7 @@ static int alchemy_clk_fgv1_detr(struct clk_hw *hw,
 }
 
 /* Au1000, Au1100, Au15x0, Au12x0 */
-static struct clk_ops alchemy_clkops_fgenv1 = {
+static const struct clk_ops alchemy_clkops_fgenv1 = {
 	.recalc_rate	= alchemy_clk_fgv1_recalc,
 	.determine_rate	= alchemy_clk_fgv1_detr,
 	.set_rate	= alchemy_clk_fgv1_setr,
@@ -716,7 +728,7 @@ static int alchemy_clk_fgv2_detr(struct clk_hw *hw,
 }
 
 /* Au1300 larger input mux, no separate disable bit, flexible divider */
-static struct clk_ops alchemy_clkops_fgenv2 = {
+static const struct clk_ops alchemy_clkops_fgenv2 = {
 	.recalc_rate	= alchemy_clk_fgv2_recalc,
 	.determine_rate	= alchemy_clk_fgv2_detr,
 	.set_rate	= alchemy_clk_fgv2_setr,
@@ -742,7 +754,7 @@ static const char * const alchemy_clk_fgen_names[] = {
 static int __init alchemy_clk_init_fgens(int ctype)
 {
 	struct clk *c;
-	struct clk_init_data id;
+	struct clk_init_data id = {};
 	struct alchemy_fgcs_clk *a;
 	unsigned long v;
 	int i, ret;
@@ -763,7 +775,7 @@ static int __init alchemy_clk_init_fgens(int ctype)
 	}
 	id.flags = CLK_SET_RATE_PARENT | CLK_GET_RATE_NOCACHE;
 
-	a = kzalloc((sizeof(*a)) * 6, GFP_KERNEL);
+	a = kzalloc_objs(*a, 6);
 	if (!a)
 		return -ENOMEM;
 
@@ -924,7 +936,7 @@ static int alchemy_clk_csrc_detr(struct clk_hw *hw,
 	return alchemy_clk_fgcs_detr(hw, req, scale, 4);
 }
 
-static struct clk_ops alchemy_clkops_csrc = {
+static const struct clk_ops alchemy_clkops_csrc = {
 	.recalc_rate	= alchemy_clk_csrc_recalc,
 	.determine_rate	= alchemy_clk_csrc_detr,
 	.set_rate	= alchemy_clk_csrc_setr,
@@ -947,9 +959,9 @@ static int alchemy_csrc_dt2[] = { 1, 4, 3, 2 };	/* Au1300 */
 
 static int __init alchemy_clk_setup_imux(int ctype)
 {
+	struct clk_init_data id = {};
 	struct alchemy_fgcs_clk *a;
 	const char * const *names;
-	struct clk_init_data id;
 	unsigned long v;
 	int i, ret, *dt;
 	struct clk *c;
@@ -984,11 +996,10 @@ static int __init alchemy_clk_setup_imux(int ctype)
 		return -ENODEV;
 	}
 
-	a = kzalloc((sizeof(*a)) * 6, GFP_KERNEL);
+	a = kzalloc_objs(*a, 6);
 	if (!a)
 		return -ENOMEM;
 
-	spin_lock_init(&alchemy_clk_csrc_lock);
 	ret = 0;
 
 	for (i = 0; i < 6; i++) {
