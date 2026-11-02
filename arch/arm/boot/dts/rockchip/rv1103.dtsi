@@ -1,0 +1,296 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2022 Rockchip Electronics Co., Ltd.
+ *
+ * Minimal RV1103 (RV1106 package variant) devicetree, with the devices
+ * used by the Luckfox Pico Mini boards.
+ */
+
+#include <dt-bindings/clock/rockchip,rv1106-cru.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	compatible = "rockchip,rv1103";
+
+	interrupt-parent = <&gic>;
+
+	aliases {
+		gpio0 = &gpio0;
+		gpio1 = &gpio1;
+		gpio3 = &gpio3;
+		gpio4 = &gpio4;
+		serial2 = &uart2;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu0: cpu@f00 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a7";
+			reg = <0xf00>;
+		};
+	};
+
+	timer {
+		compatible = "arm,armv7-timer";
+		interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(1) | IRQ_TYPE_LEVEL_HIGH)>;
+		clock-frequency = <24000000>;
+	};
+
+	xin24m: oscillator {
+		compatible = "fixed-clock";
+		clock-frequency = <24000000>;
+		clock-output-names = "xin24m";
+		#clock-cells = <0>;
+	};
+
+	grf: syscon@ff000000 {
+		compatible = "rockchip,rv1106-grf", "syscon";
+		reg = <0xff000000 0x68000>;
+	};
+
+	gic: interrupt-controller@ff1f0000 {
+		compatible = "arm,gic-400";
+		interrupt-controller;
+		#interrupt-cells = <3>;
+		#address-cells = <0>;
+
+		reg = <0xff1f1000 0x1000>,
+		      <0xff1f2000 0x2000>,
+		      <0xff1f4000 0x2000>,
+		      <0xff1f6000 0x2000>;
+		interrupts = <GIC_PPI 9 (GIC_CPU_MASK_SIMPLE(1) | IRQ_TYPE_LEVEL_HIGH)>;
+	};
+
+	pmuioc: syscon@ff388000 {
+		compatible = "rockchip,rv1106-pmuioc", "syscon";
+		reg = <0xff388000 0x1000>;
+	};
+
+	cru: clock-controller@ff3a0000 {
+		compatible = "rockchip,rv1106-cru";
+		reg = <0xff3a0000 0x20000>;
+		rockchip,grf = <&grf>;
+		#clock-cells = <1>;
+		#reset-cells = <1>;
+
+		assigned-clocks =
+			<&cru PLL_GPLL>, <&cru PLL_CPLL>,
+			<&cru ARMCLK>,
+			<&cru ACLK_PERI_ROOT>, <&cru HCLK_PERI_ROOT>,
+			<&cru PCLK_PERI_ROOT>, <&cru ACLK_BUS_ROOT>,
+			<&cru PCLK_TOP_ROOT>, <&cru PCLK_PMU_ROOT>,
+			<&cru HCLK_PMU_ROOT>;
+		assigned-clock-rates =
+			<1188000000>, <1000000000>,
+			<816000000>,
+			<400000000>, <200000000>,
+			<100000000>, <300000000>,
+			<100000000>, <100000000>,
+			<200000000>;
+	};
+
+	uart2: serial@ff4c0000 {
+		compatible = "rockchip,rv1106-uart", "snps,dw-apb-uart";
+		reg = <0xff4c0000 0x100>;
+		interrupts = <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>;
+		reg-shift = <2>;
+		reg-io-width = <4>;
+		clock-frequency = <24000000>;
+		clocks = <&cru SCLK_UART2>, <&cru PCLK_UART2>;
+		clock-names = "baudclk", "apb_pclk";
+		pinctrl-names = "default";
+		pinctrl-0 = <&uart2m1_xfer>;
+		status = "disabled";
+	};
+
+	ioc1: syscon@ff538000 {
+		compatible = "rockchip,rv1106-ioc", "syscon";
+		reg = <0xff538000 0x1000>;
+	};
+
+	ioc2: syscon@ff548000 {
+		compatible = "rockchip,rv1106-ioc", "syscon";
+		reg = <0xff548000 0x1000>;
+	};
+
+	ioc3: syscon@ff558000 {
+		compatible = "rockchip,rv1106-ioc", "syscon";
+		reg = <0xff558000 0x1000>;
+	};
+
+	ioc4: syscon@ff568000 {
+		compatible = "rockchip,rv1106-ioc", "syscon";
+		reg = <0xff568000 0x1000>;
+	};
+
+	sdmmc: mmc@ffaa0000 {
+		compatible = "rockchip,rv1106-dw-mshc", "rockchip,rk3288-dw-mshc";
+		reg = <0xffaa0000 0x4000>;
+		interrupts = <GIC_SPI 52 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru HCLK_SDMMC>, <&cru CCLK_SRC_SDMMC>,
+			 <&cru SCLK_SDMMC_DRV>, <&cru SCLK_SDMMC_SAMPLE>;
+		clock-names = "biu", "ciu", "ciu-drive", "ciu-sample";
+		fifo-depth = <0x100>;
+		max-frequency = <200000000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sdmmc0_clk &sdmmc0_cmd &sdmmc0_det &sdmmc0_bus4>;
+		status = "disabled";
+	};
+
+	sfc: spi@ffac0000 {
+		compatible = "rockchip,sfc";
+		reg = <0xffac0000 0x4000>;
+		interrupts = <GIC_SPI 53 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru SCLK_SFC>, <&cru HCLK_SFC>;
+		clock-names = "clk_sfc", "hclk_sfc";
+		assigned-clocks = <&cru SCLK_SFC>;
+		assigned-clock-rates = <75000000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&fspi_pins &fspi_cs0>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "disabled";
+	};
+
+	pinctrl: pinctrl {
+		compatible = "rockchip,rv1106-pinctrl";
+		rockchip,grf = <&ioc1>;
+		rockchip,pmu = <&pmuioc>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		gpio0: gpio@ff380000 {
+			compatible = "rockchip,gpio-bank";
+			reg = <0xff380000 0x100>;
+			interrupts = <GIC_SPI 5 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru PCLK_PMU_GPIO0>, <&cru DBCLK_PMU_GPIO0>;
+			rockchip,grf = <&pmuioc>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pinctrl 0 0 32>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+
+		gpio1: gpio@ff530000 {
+			compatible = "rockchip,gpio-bank";
+			reg = <0xff530000 0x100>;
+			interrupts = <GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru PCLK_GPIO1>, <&cru DBCLK_GPIO1>;
+			rockchip,grf = <&ioc1>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pinctrl 0 32 32>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+
+		gpio3: gpio@ff550000 {
+			compatible = "rockchip,gpio-bank";
+			reg = <0xff550000 0x100>;
+			interrupts = <GIC_SPI 11 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru PCLK_GPIO3>, <&cru DBCLK_GPIO3>;
+			rockchip,grf = <&ioc3>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pinctrl 0 96 32>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+
+		gpio4: gpio@ff560000 {
+			compatible = "rockchip,gpio-bank";
+			reg = <0xff560000 0x100>;
+			interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru PCLK_GPIO4>, <&cru DBCLK_GPIO4>;
+			rockchip,grf = <&ioc4>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pinctrl 0 128 32>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+	};
+};
+
+#include <arm64/rockchip/rockchip-pinconf.dtsi>
+
+&pinctrl {
+	fspi {
+		fspi_pins: fspi-pins {
+			rockchip,pins =
+				/* fspi_clk */
+				<4 RK_PB1 2 &pcfg_pull_up_drv_level_2>,
+				/* fspi_d0 */
+				<4 RK_PA4 2 &pcfg_pull_none>,
+				/* fspi_d1 */
+				<4 RK_PA3 2 &pcfg_pull_none>,
+				/* fspi_d2 */
+				<4 RK_PA2 2 &pcfg_pull_none>,
+				/* fspi_d3 */
+				<4 RK_PA6 2 &pcfg_pull_none>;
+		};
+
+		fspi_cs0: fspi-cs0 {
+			rockchip,pins =
+				/* fspi_cs0n */
+				<4 RK_PB0 2 &pcfg_pull_up>;
+		};
+	};
+
+	sdmmc0 {
+		sdmmc0_bus4: sdmmc0-bus4 {
+			rockchip,pins =
+				/* sdmmc0_d0 */
+				<3 RK_PA3 1 &pcfg_pull_up_drv_level_2>,
+				/* sdmmc0_d1 */
+				<3 RK_PA2 1 &pcfg_pull_up_drv_level_2>,
+				/* sdmmc0_d2 */
+				<3 RK_PA7 1 &pcfg_pull_up_drv_level_2>,
+				/* sdmmc0_d3 */
+				<3 RK_PA6 1 &pcfg_pull_up_drv_level_2>;
+		};
+
+		sdmmc0_clk: sdmmc0-clk {
+			rockchip,pins =
+				/* sdmmc0_clk */
+				<3 RK_PA4 1 &pcfg_pull_up_drv_level_2>;
+		};
+
+		sdmmc0_cmd: sdmmc0-cmd {
+			rockchip,pins =
+				/* sdmmc0_cmd */
+				<3 RK_PA5 1 &pcfg_pull_up_drv_level_2>;
+		};
+
+		sdmmc0_det: sdmmc0-det {
+			rockchip,pins =
+				/* sdmmc0_det */
+				<3 RK_PA1 1 &pcfg_pull_up>;
+		};
+	};
+
+	uart2 {
+		uart2m1_xfer: uart2m1-xfer {
+			rockchip,pins =
+				/* uart2_rx_m1 */
+				<1 RK_PB3 2 &pcfg_pull_up>,
+				/* uart2_tx_m1 */
+				<1 RK_PB2 2 &pcfg_pull_up>;
+		};
+	};
+};
